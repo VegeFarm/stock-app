@@ -491,48 +491,51 @@ if "rules_text" not in st.session_state:
 with st.sidebar:
     st.subheader("표현 규칙(기본값 + 수정 가능)")
 
-    up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
-    if up is not None:
-        st.session_state["rules_text"] = up.getvalue().decode("utf-8", errors="ignore")
+    with st.expander("PACK/BOX/EA 규칙", expanded=False):
+        up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
+        if up is not None:
+            st.session_state["rules_text"] = up.getvalue().decode("utf-8", errors="ignore")
 
-    st.text_area("PACK/BOX/EA 규칙", key="rules_text", height=260)
+        st.text_area("규칙", key="rules_text", height=260)
 
-    colA, colB = st.columns(2)
-    with colA:
-        allow_decimal_pack = st.checkbox("팩 소수 허용", value=False)
-    with colB:
-        allow_decimal_box = st.checkbox("박스 소수 허용", value=True)
+        colA, colB = st.columns(2)
+        with colA:
+            allow_decimal_pack = st.checkbox("팩 소수 허용", value=False)
+        with colB:
+            allow_decimal_box = st.checkbox("박스 소수 허용", value=True)
 
-    with st.form("add_rule_form", clear_on_submit=False):
-        st.markdown("**규칙 추가/업데이트**")
-        r_type = st.selectbox("TYPE", ["팩", "개", "박스"])
-        r_name = st.text_input("상품명(원본 제품명과 동일)", value="")
-        r_val = st.text_input("값(PACK=1팩 g, BOX=1박스 kg, EA=1개 g)", value="")
-        submitted = st.form_submit_button("추가/업데이트")
-        if submitted:
-            st.session_state["rules_text"] = upsert_rule(
-                st.session_state["rules_text"], r_type, r_name, r_val
+        with st.form("add_rule_form", clear_on_submit=False):
+            st.markdown("**규칙 추가/업데이트**")
+            r_type = st.selectbox("TYPE", ["팩", "개", "박스"])
+            r_name = st.text_input("상품명(원본 제품명과 동일)", value="")
+            r_val = st.text_input("값(PACK=1팩 g, BOX=1박스 kg, EA=1개 g)", value="")
+            submitted = st.form_submit_button("추가/업데이트")
+            if submitted:
+                st.session_state["rules_text"] = upsert_rule(
+                    st.session_state["rules_text"], r_type, r_name, r_val
+                )
+                st.success("규칙 반영 완료!")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("rules.txt로 저장(로컬용)"):
+                try:
+                    save_rules_text(st.session_state["rules_text"])
+                    st.success("rules.txt 저장 완료!")
+                except Exception as e:
+                    st.error(f"저장 실패: {e}")
+
+        with col2:
+            st.download_button(
+                "rules.txt 다운로드",
+                data=st.session_state["rules_text"].encode("utf-8"),
+                file_name="rules.txt",
+                mime="text/plain",
             )
-            st.success("규칙 반영 완료!")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("rules.txt로 저장(로컬용)"):
-            try:
-                save_rules_text(st.session_state["rules_text"])
-                st.success("rules.txt 저장 완료!")
-            except Exception as e:
-                st.error(f"저장 실패: {e}")
-
-    with col2:
-        st.download_button(
-            "rules.txt 다운로드",
-            data=st.session_state["rules_text"].encode("utf-8"),
-            file_name="rules.txt",
-            mime="text/plain",
-        )
-
+    # ✅ 규칙과 무관한 옵션은 expander 밖에 두고 싶으면 여기로 빼도 됨
     show_debug = st.checkbox("디버그(원본 파싱 보기)", value=False)
+
 
 pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
 
@@ -583,3 +586,4 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
