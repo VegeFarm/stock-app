@@ -1,7 +1,6 @@
 import io
 import os
 import re
-import zipfile
 from datetime import datetime
 from collections import defaultdict
 
@@ -15,22 +14,25 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import ParagraphStyle
 
+# -------------------- PDF image render (screenshot) --------------------
+try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None
 
-# -------------------- PDF libs --------------------
+# -------------------- PDF text extract libs --------------------
 try:
     import pdfplumber  # pip install pdfplumber
 except Exception:
     pdfplumber = None
 
-# ✅ 원본 PDF 페이지 분리(Writer 필요)
 try:
-    from pypdf import PdfReader, PdfWriter  # pip install pypdf
+    from pypdf import PdfReader  # pip install pypdf
 except Exception:
     try:
-        from PyPDF2 import PdfReader, PdfWriter  # pip install PyPDF2
+        from PyPDF2 import PdfReader  # fallback
     except Exception:
         PdfReader = None
-        PdfWriter = None
 
 COUNT_UNITS = ["개", "통", "팩", "봉"]
 RULES_FILE = "rules.txt"
@@ -86,9 +88,9 @@ def load_rules_text() -> str:
 # 박스(BOX),상품명,박스_기준_kg(=1박스가 몇 kg인지) ex) 2 / 2kg / 2000g
 # 개(EA),상품명,1개_기준_g(=1개가 몇 g인지) ex) 1kg / 500g
 #
-# ✅ 출력(요청 반영)
-# - 팩/개/박스/통/봉/단/kg/g 전부 "숫자만" 표시
-# - BOX 규칙 있는 상품은 합계가 작아도 나눠서 표시 (예: 600g / 2000g = 0.3)
+# ✅ 출력 규칙
+# - 화면/결과는 모두 숫자만 출력(단위 글자 없음)
+# - BOX 등록 상품은 1 미만이어도 나눠서 표시 (예: 600g / 2000g = 0.3)
 
 팩,건대추,500
 팩,양송이,500
@@ -177,35 +179,28 @@ def upsert_rule(text: str, typ: str, name: str, val: str) -> str:
     return "\n".join(out)
 
 
-# -------------------- 원본 PDF 페이지 분리 --------------------
-def split_original_pdf_to_page_pdfs(file_bytes: bytes) -> list[bytes]:
+# -------------------- Original PDF -> Screenshot images --------------------
+def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[bytes]:
     """
-    업로드한 '원본 PDF'를 페이지별로 분리해서 각 페이지를 PDF bytes로 반환
+    PDF 각 페이지를 PNG 스크린샷으로 렌더링하여 bytes 리스트 반환
+    zoom: 1.0~3.0 (클수록 선명/용량 증가)
     """
-    if PdfReader is None or PdfWriter is None:
-        raise RuntimeError("원본 PDF 페이지 분리는 pypdf 또는 PyPDF2가 필요합니다. (pip install pypdf)")
+    if fitz is None:
+        raise RuntimeError("스크린샷 저장은 pymupdf가 필요합니다. requirements.txt에 pymupdf 추가하세요.")
 
-    reader = PdfReader(io.BytesIO(file_bytes))
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    out: list[bytes] = []
+    mat = fitz.Matrix(zoom, zoom)
 
-    # 암호화 PDF 대응(빈 비번 시도)
-    try:
-        if getattr(reader, "is_encrypted", False):
-            reader.decrypt("")
-    except Exception:
-        pass
-
-    out_pages: list[bytes] = []
-    for i in range(len(reader.pages)):
-        writer = PdfWriter()
-        writer.add_page(reader.pages[i])
-        buf = io.BytesIO()
-        writer.write(buf)
-        out_pages.append(buf.getvalue())
-
-    return out_pages
+    for i in range(doc.page_count):
+        page = doc.load_page(i)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        out.append(pix.tobytes("png"))
+    doc.close()
+    return out
 
 
-# -------------------- PDF parsing (텍스트 추출) --------------------
+# -------------------- PDF text parsing --------------------
 def extract_lines_from_pdf(file_bytes: bytes) -> list[str]:
     lines: list[str] = []
 
@@ -353,7 +348,7 @@ def _append_count_parts(parts: list[str], counts: dict):
 
 def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
                         allow_decimal_pack: bool, allow_decimal_box: bool) -> str:
-    parts = []
+    parts: list[str] = []
 
     # 단도 숫자만
     if rec["bunch"]:
@@ -508,7 +503,7 @@ st.title("제품별 수량 합산(PDF 업로드)")
 if "rules_text" not in st.session_state:
     st.session_state["rules_text"] = load_rules_text()
 
-# 기본값(언바운드 방지)
+# 기본값
 allow_decimal_pack = False
 allow_decimal_box = True
 
@@ -523,10 +518,8 @@ with st.sidebar:
         st.text_area("규칙", key="rules_text", height=260)
 
         colA, colB = st.columns(2)
-        with colA:
-            allow_decimal_pack = st.checkbox("팩 소수 허용", value=False)
-        with colB:
-            allow_decimal_box = st.checkbox("박스 소수 허용", value=True)
+        allow_decimal_pack = colA.checkbox("팩 소수 허용", value=False)
+        allow_decimal_box = colB.checkbox("박스 소수 허용", value=True)
 
         with st.form("add_rule_form", clear_on_submit=False):
             st.markdown("**규칙 추가/업데이트**")
@@ -541,21 +534,19 @@ with st.sidebar:
                 st.success("규칙 반영 완료!")
 
         col1, col2 = st.columns(2)
-        with col1:
-            if st.button("rules.txt로 저장(로컬용)"):
-                try:
-                    save_rules_text(st.session_state["rules_text"])
-                    st.success("rules.txt 저장 완료!")
-                except Exception as e:
-                    st.error(f"저장 실패: {e}")
+        if col1.button("rules.txt로 저장(로컬용)"):
+            try:
+                save_rules_text(st.session_state["rules_text"])
+                st.success("rules.txt 저장 완료!")
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
 
-        with col2:
-            st.download_button(
-                "rules.txt 다운로드",
-                data=st.session_state["rules_text"].encode("utf-8"),
-                file_name="rules.txt",
-                mime="text/plain",
-            )
+        col2.download_button(
+            "rules.txt 다운로드",
+            data=st.session_state["rules_text"].encode("utf-8"),
+            file_name="rules.txt",
+            mime="text/plain",
+        )
 
 pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
 
@@ -563,44 +554,37 @@ uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
 
 if uploaded:
     file_bytes = uploaded.getvalue()
-
-    # ✅ 업로드 시각 기반 파일명 prefix: 해당시간_1.pdf 형태
     time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # -------------------- 원본 PDF 페이지별 다운로드(요청 기능) --------------------
-    with st.expander("원본 PDF 페이지별 다운로드", expanded=True):
-        try:
-            page_pdfs = split_original_pdf_to_page_pdfs(file_bytes)
-            st.caption(f"파일명 예시: {time_prefix}_1.pdf, {time_prefix}_2.pdf ...")
-    
-            per_row = 6  # 한 줄에 6개 버튼
-    
-            total = len(page_pdfs)
-            for start in range(0, total, per_row):
-                cols = st.columns(per_row)
-                for j in range(per_row):
-                    idx = start + j
-                    if idx >= total:
-                        break
-    
-                    page_no = idx + 1
-                    pb = page_pdfs[idx]
-    
-                    # ✅ 중첩 with 없이 컬럼에 바로 버튼 생성
-                    cols[j].download_button(
-                        label=str(page_no),
-                        data=pb,
-                        file_name=f"{time_prefix}_{page_no}.pdf",
-                        mime="application/pdf",
-                        key=f"dl_original_{page_no}",
-                        use_container_width=True,
-                    )
-    
-        except Exception as e:
-            st.error(f"원본 PDF 페이지 분리 실패: {e}")
+    # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
+    st.subheader("원본 PDF 페이지별 스크린샷 다운로드")
+    try:
+        zoom = 2.0  # 기본 선명도(원하면 2.5~3.0으로 올려도 됨)
+        per_row = 8  # 한 줄 버튼 개수(공간 절약)
 
+        page_images = render_pdf_pages_to_images(file_bytes, zoom=zoom)
+        total = len(page_images)
 
-    # -------------------- 기존 기능: 제품별 합계 --------------------
+        for start in range(0, total, per_row):
+            cols = st.columns(per_row)
+            for j in range(per_row):
+                idx = start + j
+                if idx >= total:
+                    break
+                page_no = idx + 1
+                cols[j].download_button(
+                    label=str(page_no),
+                    data=page_images[idx],
+                    file_name=f"{time_prefix}_{page_no}.png",
+                    mime="image/png",
+                    key=f"dl_img_{page_no}",
+                    use_container_width=True,
+                )
+
+    except Exception as e:
+        st.error(f"스크린샷 생성 실패: {e} (requirements.txt에 pymupdf 추가 필요)")
+
+    # ---------- 기존 기능: 제품별 합계 ----------
     lines = extract_lines_from_pdf(file_bytes)
     items = parse_items(lines)
     agg = aggregate(items)
@@ -632,10 +616,7 @@ if uploaded:
             mime="application/pdf",
         )
     except Exception as e:
-        st.error(f"제품별 합계 PDF 생성 실패: {e}\n\n(해결) fonts/NanumGothic.ttf 경로/파일명 확인")
+        st.error(f"제품별 합계 PDF 생성 실패: {e} (fonts/NanumGothic.ttf 확인)")
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
-
-
-
