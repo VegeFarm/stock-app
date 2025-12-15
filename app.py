@@ -5,6 +5,14 @@ from collections import defaultdict
 
 import pandas as pd
 import streamlit as st
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.styles import ParagraphStyle
+
 
 # -------------------- PDF libs --------------------
 try:
@@ -353,6 +361,79 @@ def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
+    # ✅ 레포 구조: (루트)app.py, (루트)/fonts/NanumGothic.ttf
+    font_path = os.path.join("fonts", "NanumGothic.ttf")
+    font_name = "NanumGothic"
+
+    if not os.path.exists(font_path):
+        raise RuntimeError(f"폰트 파일을 못 찾음: {font_path} (fonts 폴더/파일명 확인)")
+
+    # ✅ 폰트 등록 + 패밀리까지 등록(Title/Paragraph에서 확실히 잡힘)
+    if font_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(font_name, font_path))
+        pdfmetrics.registerFontFamily(font_name, normal=font_name, bold=font_name, italic=font_name, boldItalic=font_name)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                            leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
+
+    styles = getSampleStyleSheet()
+
+    title_style = styles["Title"].clone("KTitle")
+    title_style.fontName = font_name
+
+    cell_style = ParagraphStyle(
+        "KCell",
+        fontName=font_name,
+        fontSize=10,
+        leading=12,
+        alignment=1,      # CENTER
+        wordWrap="CJK",   # ✅ 한글 줄바꿈
+    )
+
+    header_style = ParagraphStyle(
+        "KHeader",
+        fontName=font_name,
+        fontSize=10,
+        leading=12,
+        alignment=1,
+        wordWrap="CJK",
+    )
+
+    elements = [Paragraph(title, title_style), Spacer(1, 12)]
+
+    safe_df = df.fillna("").astype(str)
+
+    # ✅ 셀을 Paragraph로 감싸야 한글이 안정적으로 적용됨
+    header = [Paragraph(str(c), header_style) for c in safe_df.columns]
+    body = [[Paragraph(str(v), cell_style) for v in row] for row in safe_df.values.tolist()]
+    data = [header] + body
+
+    # 컬럼 폭 자동(가로 A4에 균등 분배)
+    page_w, _ = landscape(A4)
+    usable_w = page_w - 36
+    col_w = usable_w / max(1, len(safe_df.columns))
+    col_widths = [col_w] * len(safe_df.columns)
+
+    table = Table(data, repeatRows=1, colWidths=col_widths)
+    table.setStyle(TableStyle([
+        # ✅ 테이블 전체에 폰트 강제 (이거 때문에 깨짐이 해결되는 경우 많음)
+        ("FONTNAME", (0, 0), (-1, -1), font_name),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+
+    elements.append(table)
+    doc.build(elements)
+    return buf.getvalue()
+
+
+
+
 # -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="제품별 수량 합산", layout="wide")
 st.title("제품별 수량 합산(PDF 업로드)")
@@ -428,15 +509,25 @@ if uploaded:
     df_long = pd.DataFrame(rows)
     df_wide = to_3_per_row(df_long, 3)
 
-    st.subheader("제품별 합계 (1행에 3개)")
+    st.subheader("제품별 합계")
     st.dataframe(df_wide, use_container_width=True, hide_index=True)
+    
+    pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
+    st.download_button(
+       "PDF 다운로드",
+        data=pdf_bytes,
+        file_name="제품별_합계.pdf",
+        mime="application/pdf",
+    )
 
     if show_debug:
         st.subheader("디버그: 원본 파싱 결과(제품명/구분/수량)")
         st.dataframe(pd.DataFrame(items, columns=["제품명", "구분", "수량"]), use_container_width=True, hide_index=True)
 
-    csv = df_long.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("CSV 다운로드(세로형)", data=csv, file_name="제품별_합계.csv", mime="text/csv")
-
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
+
+
+
+
