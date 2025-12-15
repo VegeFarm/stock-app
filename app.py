@@ -509,10 +509,10 @@ if uploaded:
     df_long = pd.DataFrame(rows)
     df_wide = to_3_per_row(df_long, 3)
 
-    st.subheader("제품별 합계 (1행에 3개)")
+    st.subheader("제품별 합계")
     st.dataframe(df_wide, use_container_width=True, hide_index=True)
     
-    pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계 (1행에 3개)")
+    pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
     st.download_button(
        "PDF 다운로드",
         data=pdf_bytes,
@@ -526,6 +526,7 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
 
 
 
