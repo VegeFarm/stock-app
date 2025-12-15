@@ -39,6 +39,25 @@ BOX,적근대,2
 RULES_FILE = "rules.txt"  # (선택) 레포에 rules.txt를 만들어두면 기본값으로 자동 로드
 
 
+def norm_type(t: str) -> str:
+    t = (t or "").strip()
+    if t in ["팩", "PACK", "pack", "Pack"]:
+        return "PACK"
+    if t in ["박스", "BOX", "box", "Box"]:
+        return "BOX"
+    return t.upper().strip()
+
+
+def parse_pack_size_g(val: str) -> float:
+    """PACK 값: 500 / 500g / 0.5kg 모두 허용 -> g로 변환"""
+    v = (val or "").strip().lower().replace(" ", "")
+    if v.endswith("kg"):
+        return float(v[:-2]) * 1000.0
+    if v.endswith("g"):
+        return float(v[:-1])
+    return float(v)  # 숫자만이면 g로 간주
+
+
 def load_rules_text() -> str:
     if os.path.exists(RULES_FILE):
         try:
@@ -50,31 +69,46 @@ def load_rules_text() -> str:
 
 
 def parse_rules(text: str):
-    pack_rules = {}  # {상품명: {"size_g": int, "label": "팩"}}
-    box_rules = {}   # {상품명: {"size_kg": float, "label": "박스"}}
+    pack_rules = {}  # {상품명: {"size_g": float}}
+    box_rules = {}   # {상품명: {"size_kg": float}}
 
     for raw in (text or "").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 3:
             continue
 
-        typ, name, val = parts[0].upper(), parts[1], parts[2]
+        typ = norm_type(parts[0])   # <-- 핵심: '팩'도 'PACK'으로 바꿈
+        name = parts[1].strip()
+        val_raw = parts[2].strip()
+
         try:
             if typ == "PACK":
-                size_g = float(val)
+                size_g = parse_pack_size_g(val_raw)  # 500 / 500g / 0.5kg OK
                 if size_g > 0:
-                    pack_rules[name] = {"size_g": size_g, "label": "팩"}
+                    pack_rules[name] = {"size_g": size_g}
+
             elif typ == "BOX":
-                size_kg = float(val)
+                # BOX 값은 kg 기준(2 / 2kg / 2000g 도 허용)
+                v = val_raw.strip().lower().replace(" ", "")
+                if v.endswith("g"):
+                    size_kg = float(v[:-1]) / 1000.0
+                elif v.endswith("kg"):
+                    size_kg = float(v[:-2])
+                else:
+                    size_kg = float(v)
+
                 if size_kg > 0:
-                    box_rules[name] = {"size_kg": size_kg, "label": "박스"}
+                    box_rules[name] = {"size_kg": size_kg}
+
         except Exception:
             continue
 
     return pack_rules, box_rules
+
 
 
 # -------------------- PDF parsing --------------------
@@ -325,3 +359,4 @@ if uploaded:
     st.download_button("CSV 다운로드", data=csv, file_name="제품별_합계.csv", mime="text/csv")
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR 처리가 필요합니다.")
+
