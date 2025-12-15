@@ -328,4 +328,237 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
     # BOX 우선: 박스 기준으로 나눈 값(0.3처럼) 표시
     if product in box_rules and grams > 0:
         box_size_kg = float(box_rules[product]["size_kg"])
-        denom_g =_
+        denom_g = box_size_kg * 1000.0
+        boxes = grams / denom_g
+
+        if allow_decimal_box:
+            parts.append(f"{fmt_num(boxes, 2)}")
+        else:
+            if abs(boxes - round(boxes)) < 1e-9:
+                parts.append(f"{int(round(boxes))}")
+            else:
+                parts.append(f"{fmt_num(boxes, 2)}")
+
+        _append_count_parts(parts, counts)
+        return " ".join(parts).strip() if parts else "0"
+
+    # PACK / EA 처리
+    pack_shown = False
+    ea_shown = False
+
+    # spec 자체에 팩이 있으면 우선
+    if counts.get("팩", 0) > 0:
+        parts.append(f'{counts["팩"]}')
+        pack_shown = True
+        counts.pop("팩", None)
+
+    # rules로 g -> 팩 변환
+    elif product in pack_rules and grams > 0:
+        size_g = float(pack_rules[product]["size_g"])
+        packs = grams / size_g
+        if allow_decimal_pack:
+            parts.append(f"{fmt_num(packs, 2)}")
+            pack_shown = True
+        else:
+            if abs(packs - round(packs)) < 1e-9:
+                parts.append(f"{int(round(packs))}")
+                pack_shown = True
+
+    # 팩이 안 잡혔으면 "개" 처리
+    if not pack_shown:
+        if counts.get("개", 0) > 0:
+            parts.append(f'{counts["개"]}')
+            ea_shown = True
+            counts.pop("개", None)
+
+        elif product in ea_rules and grams > 0:
+            size_g = float(ea_rules[product]["size_g"])
+            eas = grams / size_g
+            # 정수로 딱 떨어질 때만 표시(아니면 중량 kg 소수로)
+            if abs(eas - round(eas)) < 1e-9:
+                parts.append(f"{int(round(eas))}")
+                ea_shown = True
+
+    # 팩도 개도 안 잡히면 중량(kg 소수)
+    if not pack_shown and not ea_shown:
+        w = format_weight(grams)
+        if w:
+            parts.append(w)
+
+    _append_count_parts(parts, counts)
+    return " ".join(parts).strip() if parts else "0"
+
+
+def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
+    out = []
+    for i in range(0, len(df), n):
+        chunk = df.iloc[i:i + n].reset_index(drop=True)
+        row = {}
+        for j in range(n):
+            if j < len(chunk):
+                row[f"제품명{j+1}"] = chunk.loc[j, "제품명"]
+                row[f"합계{j+1}"] = chunk.loc[j, "합계"]
+            else:
+                row[f"제품명{j+1}"] = ""
+                row[f"합계{j+1}"] = ""
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
+    font_path = os.path.join("fonts", "NanumGothic.ttf")
+    font_name = "NanumGothic"
+
+    if not os.path.exists(font_path):
+        raise RuntimeError(f"폰트 파일을 못 찾음: {font_path} (fonts 폴더/파일명 확인)")
+
+    if font_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(font_name, font_path))
+        pdfmetrics.registerFontFamily(
+            font_name, normal=font_name, bold=font_name, italic=font_name, boldItalic=font_name
+        )
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(A4),
+        leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"].clone("KTitle")
+    title_style.fontName = font_name
+
+    cell_style = ParagraphStyle(
+        "KCell", fontName=font_name, fontSize=10, leading=12,
+        alignment=1, wordWrap="CJK"
+    )
+    header_style = ParagraphStyle(
+        "KHeader", fontName=font_name, fontSize=10, leading=12,
+        alignment=1, wordWrap="CJK"
+    )
+
+    elements = [Paragraph(title, title_style), Spacer(1, 12)]
+    safe_df = df.fillna("").astype(str)
+
+    header = [Paragraph(str(c), header_style) for c in safe_df.columns]
+    body = [[Paragraph(str(v), cell_style) for v in row] for row in safe_df.values.tolist()]
+    data = [header] + body
+
+    page_w, _ = landscape(A4)
+    usable_w = page_w - 36
+    col_w = usable_w / max(1, len(safe_df.columns))
+    col_widths = [col_w] * len(safe_df.columns)
+
+    table = Table(data, repeatRows=1, colWidths=col_widths)
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), font_name),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+
+    elements.append(table)
+    doc.build(elements)
+    return buf.getvalue()
+
+
+# -------------------- Streamlit UI --------------------
+st.set_page_config(page_title="제품별 수량 합산", layout="wide")
+st.title("제품별 수량 합산(PDF 업로드)")
+
+if "rules_text" not in st.session_state:
+    st.session_state["rules_text"] = load_rules_text()
+
+# 기본값(언바운드 방지)
+allow_decimal_pack = False
+allow_decimal_box = True
+
+with st.sidebar:
+    st.subheader("표현 규칙(기본값 + 수정 가능)")
+
+    # ✅ 규칙 접기/펼치기
+    with st.expander("PACK/BOX/EA 규칙", expanded=False):
+        up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
+        if up is not None:
+            st.session_state["rules_text"] = up.getvalue().decode("utf-8", errors="ignore")
+
+        st.text_area("규칙", key="rules_text", height=260)
+
+        colA, colB = st.columns(2)
+        with colA:
+            allow_decimal_pack = st.checkbox("팩 소수 허용", value=False)
+        with colB:
+            allow_decimal_box = st.checkbox("박스 소수 허용", value=True)
+
+        with st.form("add_rule_form", clear_on_submit=False):
+            st.markdown("**규칙 추가/업데이트**")
+            r_type = st.selectbox("TYPE", ["팩", "개", "박스"])
+            r_name = st.text_input("상품명(원본 제품명과 동일)", value="")
+            r_val = st.text_input("값(PACK=1팩 g, BOX=1박스 kg, EA=1개 g)", value="")
+            submitted = st.form_submit_button("추가/업데이트")
+            if submitted:
+                st.session_state["rules_text"] = upsert_rule(
+                    st.session_state["rules_text"], r_type, r_name, r_val
+                )
+                st.success("규칙 반영 완료!")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("rules.txt로 저장(로컬용)"):
+                try:
+                    save_rules_text(st.session_state["rules_text"])
+                    st.success("rules.txt 저장 완료!")
+                except Exception as e:
+                    st.error(f"저장 실패: {e}")
+
+        with col2:
+            st.download_button(
+                "rules.txt 다운로드",
+                data=st.session_state["rules_text"].encode("utf-8"),
+                file_name="rules.txt",
+                mime="text/plain",
+            )
+
+pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
+
+uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
+
+if uploaded:
+    file_bytes = uploaded.getvalue()
+    lines = extract_lines_from_pdf(file_bytes)
+    items = parse_items(lines)
+    agg = aggregate(items)
+
+    rows = []
+    for product in sorted(agg.keys()):
+        rows.append({
+            "제품명": product,
+            "합계": format_total_custom(
+                product, agg[product],
+                pack_rules, box_rules, ea_rules,
+                allow_decimal_pack=allow_decimal_pack,
+                allow_decimal_box=allow_decimal_box
+            ),
+        })
+
+    df_long = pd.DataFrame(rows)
+    df_wide = to_3_per_row(df_long, 3)
+
+    st.subheader("제품별 합계")
+    st.dataframe(df_wide, use_container_width=True, hide_index=True)
+
+    try:
+        pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
+        st.download_button(
+            "PDF 다운로드",
+            data=pdf_bytes,
+            file_name="제품별_합계.pdf",
+            mime="application/pdf",
+        )
+    except Exception as e:
+        st.error(f"PDF 생성 실패: {e}\n\n(해결) fonts/NanumGothic.ttf 경로/파일명 확인")
+
+else:
+    st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
