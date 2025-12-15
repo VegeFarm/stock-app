@@ -5,6 +5,11 @@ from collections import defaultdict
 
 import pandas as pd
 import streamlit as st
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+
 
 # -------------------- PDF libs --------------------
 try:
@@ -353,6 +358,41 @@ def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=landscape(A4),
+        leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18
+    )
+
+    styles = getSampleStyleSheet()
+    elements = [
+        Paragraph(title, styles["Title"]),
+        Spacer(1, 12),
+    ]
+
+    safe_df = df.fillna("").astype(str)
+    data = [list(safe_df.columns)] + safe_df.values.tolist()
+
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("TOPPADDING", (0, 0), (-1, 0), 8),
+    ]))
+
+    elements.append(table)
+    doc.build(elements)
+    return buf.getvalue()
+
+
+
 # -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="제품별 수량 합산", layout="wide")
 st.title("제품별 수량 합산(PDF 업로드)")
@@ -430,6 +470,14 @@ if uploaded:
 
     st.subheader("제품별 합계 (1행에 3개)")
     st.dataframe(df_wide, use_container_width=True, hide_index=True)
+    
+    pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계 (1행에 3개)")
+    st.download_button(
+       "PDF 다운로드",
+        data=pdf_bytes,
+        file_name="제품별_합계.pdf",
+        mime="application/pdf",
+    )
 
     if show_debug:
         st.subheader("디버그: 원본 파싱 결과(제품명/구분/수량)")
@@ -440,3 +488,4 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
