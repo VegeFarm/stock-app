@@ -16,7 +16,7 @@ from reportlab.lib.styles import ParagraphStyle
 
 # -------------------- PDF image render (screenshot) --------------------
 try:
-    import fitz  # PyMuPDF
+    import fitz  # PyMuPDF (pymupdf)
 except Exception:
     fitz = None
 
@@ -36,6 +36,37 @@ except Exception:
 
 COUNT_UNITS = ["개", "통", "팩", "봉"]
 RULES_FILE = "rules.txt"
+
+# ✅ 제품별 합계 고정 순서(왼쪽 위 -> 오른쪽 아래)
+FIXED_PRODUCT_ORDER = [
+    "고수",
+    "공심채",
+    "그린빈",
+    "당귀",
+    "딜",
+    "래디쉬",
+    "로즈마리",
+    "로케트",
+    "바질",
+    "로즈잎",
+    "비타민",
+    "쌈샐러리",
+    "쌈추",
+    "애플",
+    "와일드",
+    "잎로메인",
+    "적겨자",
+    "적근대",
+    "적치커리",
+    "청경채",
+    "청치커리",
+    "케일",
+    "타임",
+    "통로메인",
+    "향나물",
+    "뉴그린",
+    "처빌",
+]
 
 
 # -------------------- Rules helpers --------------------
@@ -559,8 +590,8 @@ if uploaded:
     # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
     st.subheader("원본 PDF 페이지별 스크린샷 다운로드")
     try:
-        zoom = 2.0  # 기본 선명도(원하면 2.5~3.0으로 올려도 됨)
-        per_row = 8  # 한 줄 버튼 개수(공간 절약)
+        zoom = 2.0
+        per_row = 8  # 공간 절약(가로로)
 
         page_images = render_pdf_pages_to_images(file_bytes, zoom=zoom)
         total = len(page_images)
@@ -584,13 +615,30 @@ if uploaded:
     except Exception as e:
         st.error(f"스크린샷 생성 실패: {e} (requirements.txt에 pymupdf 추가 필요)")
 
-    # ---------- 기존 기능: 제품별 합계 ----------
+    # ---------- 제품별 합계 ----------
     lines = extract_lines_from_pdf(file_bytes)
     items = parse_items(lines)
     agg = aggregate(items)
 
     rows = []
-    for product in sorted(agg.keys()):
+    fixed_set = set(FIXED_PRODUCT_ORDER)
+
+    # 1) 고정 상품 먼저(없으면 0)
+    for product in FIXED_PRODUCT_ORDER:
+        if product in agg:
+            total = format_total_custom(
+                product, agg[product],
+                pack_rules, box_rules, ea_rules,
+                allow_decimal_pack=allow_decimal_pack,
+                allow_decimal_box=allow_decimal_box
+            )
+        else:
+            total = "0"
+        rows.append({"제품명": product, "합계": total})
+
+    # 2) 나머지 상품 뒤에(가나다)
+    rest = [p for p in agg.keys() if p not in fixed_set]
+    for product in sorted(rest):
         rows.append({
             "제품명": product,
             "합계": format_total_custom(
