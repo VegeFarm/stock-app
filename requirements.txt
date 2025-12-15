@@ -3,5 +3,6 @@ pandas
 pdfplumber
 pypdf
 reportlab
+pymupdf
 
 
