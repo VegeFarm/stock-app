@@ -636,3 +636,4 @@ if uploaded:
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
 
+
