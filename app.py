@@ -164,19 +164,29 @@ def parse_table_text_to_items(text: str) -> pd.DataFrame:
     return agg[["photo_product", "qty"]]
 
 
-def get_excel_products(ws) -> list[str]:
+def get_excel_products(ws, max_consecutive_blank: int = 200):
+    """
+    엑셀 시트의 '상품명' 컬럼(PRODUCT_COL)에서 실제 상품 목록을 빠르게 추출.
+    빈칸이 연속으로 일정 개수 나오면 더 이상 데이터가 없다고 보고 중단합니다.
+    """
     products = []
-    r = FIRST_DATA_ROW
-    while True:
+    blanks = 0
+    max_row = ws.max_row  # ⚠️ 반드시 한 번만 계산
+
+    for r in range(FIRST_DATA_ROW, max_row + 1):
         v = ws.cell(r, PRODUCT_COL).value
-        if v is None and r > ws.max_row:
-            break
-        if v:
-            products.append(str(v).strip())
-        r += 1
-        if r > ws.max_row + 50:
-            break
-    # 중복 제거
+        s = "" if v is None else str(v).strip()
+
+        if not s:
+            blanks += 1
+            if blanks >= max_consecutive_blank:
+                break
+            continue
+
+        blanks = 0
+        products.append(s)
+
+    # 중복 제거(순서 유지)
     seen = set()
     uniq = []
     for p in products:
@@ -186,12 +196,24 @@ def get_excel_products(ws) -> list[str]:
     return uniq
 
 
-def find_product_row(ws, product_name: str) -> int | None:
-    target = normalize_name(product_name)
-    for r in range(FIRST_DATA_ROW, ws.max_row + 1):
+def find_product_row(ws, excel_product: str, max_consecutive_blank: int = 200):
+    blanks = 0
+    max_row = ws.max_row  # ⚠️ 반드시 한 번만 계산
+
+    for r in range(FIRST_DATA_ROW, max_row + 1):
         v = ws.cell(r, PRODUCT_COL).value
-        if v and normalize_name(v) == target:
+        s = "" if v is None else str(v).strip()
+
+        if not s:
+            blanks += 1
+            if blanks >= max_consecutive_blank:
+                break
+            continue
+
+        blanks = 0
+        if s == excel_product:
             return r
+
     return None
 
 
@@ -464,3 +486,4 @@ with cB:
             use_container_width=True,
         )
         st.success("반영 완료! 다운로드해서 사용하세요.")
+
