@@ -458,7 +458,7 @@ with st.sidebar:
 
     with st.form("add_rule_form", clear_on_submit=False):
         st.markdown("**규칙 추가/업데이트**")
-        r_type = st.selectbox("TYPE", ["팩", "박스", "PACK", "BOX"])
+        r_type = st.selectbox("TYPE", ["팩", "개", "박스"])
         r_name = st.text_input("상품명(원본 제품명과 동일)", value="")
         r_val = st.text_input("값(PACK=1팩 g, BOX=박스 기준 kg)", value="")
         submitted = st.form_submit_button("추가/업데이트")
@@ -526,6 +526,7 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
 
 
 
