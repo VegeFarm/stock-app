@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import math
 from datetime import datetime
 from collections import defaultdict
 
@@ -453,18 +454,29 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
 
 
 def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
+    """
+    ✅ 세로 우선 배치(위→아래), 그 다음 열로 이동
+    예) n=3이면 1열을 위→아래로 다 채운 뒤 2열, 3열 순서
+    """
+    if df is None or len(df) == 0:
+        return pd.DataFrame([{f"제품명{i+1}": "", f"합계{i+1}": "" for i in range(n)}])
+
+    total = len(df)
+    rows_count = math.ceil(total / n)
+
     out = []
-    for i in range(0, len(df), n):
-        chunk = df.iloc[i:i + n].reset_index(drop=True)
+    for r in range(rows_count):
         row = {}
-        for j in range(n):
-            if j < len(chunk):
-                row[f"제품명{j+1}"] = chunk.loc[j, "제품명"]
-                row[f"합계{j+1}"] = chunk.loc[j, "합계"]
+        for c in range(n):
+            idx = c * rows_count + r  # ⭐ 세로 우선 핵심
+            if idx < total:
+                row[f"제품명{c+1}"] = df.iloc[idx]["제품명"]
+                row[f"합계{c+1}"] = df.iloc[idx]["합계"]
             else:
-                row[f"제품명{j+1}"] = ""
-                row[f"합계{j+1}"] = ""
+                row[f"제품명{c+1}"] = ""
+                row[f"합계{c+1}"] = ""
         out.append(row)
+
     return pd.DataFrame(out)
 
 
@@ -668,3 +680,4 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
