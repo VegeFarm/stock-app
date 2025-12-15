@@ -41,8 +41,10 @@ RULES_FILE = "rules.txt"
 # ✅ 한국시간(KST) 고정(서버가 UTC여도 파일명은 한국시간)
 KST = timezone(timedelta(hours=9))
 
+
 def now_prefix_kst() -> str:
     return datetime.now(KST).strftime("%Y%m%d_%H%M%S")
+
 
 # ✅ 제품별 합계 고정 순서(표에 항상 먼저, 위→아래 기준)
 FIXED_PRODUCT_ORDER = [
@@ -224,7 +226,7 @@ def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[byt
     zoom: 1.0~3.0 (클수록 선명/용량 증가)
     """
     if fitz is None:
-        raise RuntimeError("스크린샷 저장은 pymupdf가 필요합니다. (pip install pymupdf) 또는 requirements.txt에 pymupdf 추가")
+        raise RuntimeError("스크린샷 저장은 pymupdf가 필요합니다. (pip install pymupdf)")
 
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     out: list[bytes] = []
@@ -609,19 +611,14 @@ uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
 if uploaded:
     file_bytes = uploaded.getvalue()
 
-    # ✅ 파일명 시간 기준(다운로드/업로드)
-    prefix_mode = st.radio(
-        "스크린샷 파일명 시간 기준",
-        ["다운로드 시각", "업로드 시각(고정)"],
-        horizontal=True,
-        index=0,
-    )
-
-    # 업로드 시각(고정) prefix를 파일별로 저장
+    # ✅ 다운로드 시각으로 "고정"되는 prefix (버튼 누르는 순간마다 바뀌지 않게)
+    # - 파일이 바뀌면 새로 생성
     file_sig = (uploaded.name, len(file_bytes))
-    if st.session_state.get("uploaded_sig") != file_sig:
-        st.session_state["uploaded_sig"] = file_sig
-        st.session_state["uploaded_prefix"] = now_prefix_kst()
+    if st.session_state.get("dl_sig") != file_sig:
+        st.session_state["dl_sig"] = file_sig
+        st.session_state["dl_prefix"] = now_prefix_kst()
+
+    fixed_prefix = st.session_state["dl_prefix"]
 
     # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
     st.subheader("원본 PDF 페이지별 스크린샷 다운로드")
@@ -640,14 +637,10 @@ if uploaded:
                     break
 
                 page_no = idx + 1
-
-                # ✅ 다운로드 시각 = 이번 실행 시각(KST), 업로드 시각(고정) = 저장된 값
-                prefix = now_prefix_kst() if prefix_mode == "다운로드 시각" else st.session_state["uploaded_prefix"]
-
                 cols[j].download_button(
                     label=str(page_no),
                     data=page_images[idx],
-                    file_name=f"{prefix}_{page_no}.png",
+                    file_name=f"{fixed_prefix}_{page_no}.png",
                     mime="image/png",
                     key=f"dl_img_{page_no}",
                     use_container_width=True,
