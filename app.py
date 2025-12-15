@@ -45,6 +45,7 @@ def norm_type(t: str) -> str:
 
 
 def display_type(typ: str) -> str:
+    """rules.txt에 표시할 타입(보기 좋게 한글로)"""
     typ = norm_type(typ)
     return {"PACK": "팩", "BOX": "박스", "EA": "개"}.get(typ, typ)
 
@@ -82,10 +83,9 @@ def load_rules_text() -> str:
 # 박스(BOX),상품명,박스_기준_kg(=1박스가 몇 kg인지) ex) 2 / 2kg / 2000g
 # 개(EA),상품명,1개_기준_g(=1개가 몇 g인지) ex) 1kg / 500g
 #
-# ✅ 출력 규칙(요청 반영):
-# - 팩/개/박스 문구는 표시하지 않고 "숫자만" 표시
-# - BOX(박스) 규칙 있는 상품은 나누기 결과가 1 미만이어도 표시
-#   예) 박스 기준 2kg(=2000g)이고 합계 600g이면 600/2000=0.3 → 30% 로 표시
+# ✅ 출력(요청 반영)
+# - 팩/개/박스/통/봉/단/kg/g 전부 "숫자만" 표시
+# - BOX(박스) 규칙 있는 상품은 합계가 작아도 나눠서 표시 (예: 600g / 2000g = 0.3)
 
 팩,건대추,500
 팩,양송이,500
@@ -245,11 +245,18 @@ def parse_spec_components(spec: str):
 
     out = {"grams_per_unit": None, "bunch_per_unit": None, "counts_per_unit": {}}
 
-    mw = re.search(r"(\d+(?:\.\d+)?)(kg|g)", s)
-    if mw:
-        num = float(mw.group(1))
-        unit = mw.group(2)
-        out["grams_per_unit"] = num * 1000.0 if unit == "kg" else num
+    # ✅ 19kg250g 같은 결합 표기 지원
+    m2 = re.search(r"(\d+(?:\.\d+)?)kg(\d+(?:\.\d+)?)g", s)
+    if m2:
+        kg = float(m2.group(1))
+        g = float(m2.group(2))
+        out["grams_per_unit"] = kg * 1000.0 + g
+    else:
+        mw = re.search(r"(\d+(?:\.\d+)?)(kg|g)", s)
+        if mw:
+            num = float(mw.group(1))
+            unit = mw.group(2)
+            out["grams_per_unit"] = num * 1000.0 if unit == "kg" else num
 
     mb = re.search(r"(\d+)단", s)
     if mb:
@@ -293,40 +300,28 @@ def fmt_num(x: float, max_dec=2) -> str:
 
 
 def format_weight(grams: float) -> str | None:
+    """✅ kg/g도 숫자만: kg 소수로 표시 (19kg250g -> 19.25)"""
     if grams <= 0:
         return None
-    g = int(round(grams))
-    kg = g // 1000
-    rem = g % 1000
-    if kg > 0 and rem == 0:
-        return f"{kg}kg"
-    if kg > 0 and rem > 0:
-        return f"{kg}kg {rem}g"
-    return f"{g}g"
+    kg = grams / 1000.0
+    return fmt_num(kg, 3)  # 최대 3자리 (필요시 2로 줄여도 됨)
 
 
 def _append_count_parts(parts: list[str], counts: dict):
-    """
-    ✅ 요청 반영:
-    - '팩','개'는 suffix 없이 숫자만 출력
-    - '통','봉'은 기존처럼 suffix 유지
-    """
+    """✅ 개/팩/통/봉 전부 숫자만"""
     for u in ["개", "팩", "통", "봉"]:
         v = counts.get(u, 0)
-        if not v:
-            continue
-        if u in ["개", "팩"]:
-            parts.append(f"{v}")      # 숫자만
-        else:
-            parts.append(f"{v}{u}")   # 통/봉은 유지
+        if v:
+            parts.append(f"{v}")
 
 
 def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
                         allow_decimal_pack: bool, allow_decimal_box: bool) -> str:
     parts = []
 
+    # ✅ 단도 숫자만
     if rec["bunch"]:
-        parts.append(f'{rec["bunch"]}단')  # 단은 유지
+        parts.append(f'{rec["bunch"]}')
 
     grams = rec["grams"]
     counts = dict(rec["counts"])
@@ -335,13 +330,11 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
     if product in box_rules and grams > 0:
         box_size_kg = float(box_rules[product]["size_kg"])
         denom_g = box_size_kg * 1000.0
-        boxes = grams / denom_g  # 박스 기준으로 나눈 값
+        boxes = grams / denom_g  # 박스 기준 나눈 값(0.3처럼)
 
-        # ✅ 1 미만이면 "백분율"로 표시 (예: 600/2000=0.3 -> 30%)
         if boxes < 1:
-            parts.append(f"{fmt_num(boxes, 2)}")
+            parts.append(f"{fmt_num(boxes, 2)}")  # ✅ % 없이 소수만
         else:
-            # 1 이상은 기존 옵션 존중하되, 정수 아니어도 '중량 fallback' 하지 않고 숫자로 표시
             if allow_decimal_box:
                 parts.append(f"{fmt_num(boxes, 2)}")
             else:
@@ -375,7 +368,7 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
                 parts.append(f"{int(round(packs))}")
                 pack_shown = True
 
-    # 팩이 안 잡혔으면 "개" 처리(먼저 spec의 개, 없으면 rules로 환산) - 숫자만
+    # 팩이 안 잡혔으면 "개" 처리(숫자만)
     if not pack_shown:
         if counts.get("개", 0) > 0:
             parts.append(f'{counts["개"]}')
@@ -385,18 +378,18 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
         elif product in ea_rules and grams > 0:
             size_g = float(ea_rules[product]["size_g"])
             eas = grams / size_g
-            # 정수로 딱 떨어질 때만 숫자로 표기(아니면 중량 표기)
+            # 정수로 딱 떨어질 때만 표시(아니면 중량 kg 소수로)
             if abs(eas - round(eas)) < 1e-9:
                 parts.append(f"{int(round(eas))}")
                 ea_shown = True
 
-    # 팩도 개도 안 잡히면 중량으로
+    # 팩도 개도 안 잡히면 중량(kg 소수 숫자만)
     if not pack_shown and not ea_shown:
         w = format_weight(grams)
         if w:
             parts.append(w)
 
-    # 남은 카운트(통/봉은 suffix 유지, 개/팩은 숫자만)
+    # 남은 카운트도 전부 숫자만
     _append_count_parts(parts, counts)
 
     return " ".join(parts).strip() if parts else "0"
@@ -405,7 +398,7 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
 def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
     out = []
     for i in range(0, len(df), n):
-        chunk = df.iloc[i:i+n].reset_index(drop=True)
+        chunk = df.iloc[i:i + n].reset_index(drop=True)
         row = {}
         for j in range(n):
             if j < len(chunk):
@@ -582,8 +575,11 @@ if uploaded:
 
     if show_debug:
         st.subheader("디버그: 원본 파싱 결과(제품명/구분/수량)")
-        st.dataframe(pd.DataFrame(items, columns=["제품명", "구분", "수량"]),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(items, columns=["제품명", "구분", "수량"]),
+            use_container_width=True,
+            hide_index=True
+        )
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
