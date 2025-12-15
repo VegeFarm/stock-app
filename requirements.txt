@@ -1,6 +1,5 @@
 streamlit
-openpyxl
-pillow
 pandas
-pytesseract
-opencv-python-headless
+pdfplumber
+pypdf
+
