@@ -45,7 +45,6 @@ def norm_type(t: str) -> str:
 
 
 def display_type(typ: str) -> str:
-    """rules.txt에 표시할 타입(보기 좋게 한글로)"""
     typ = norm_type(typ)
     return {"PACK": "팩", "BOX": "박스", "EA": "개"}.get(typ, typ)
 
@@ -78,11 +77,15 @@ def load_rules_text() -> str:
         except Exception:
             pass
 
-    # 기본값(원하면 여기에 자주 쓰는 리스트 더 넣어도 됨)
     return """# TYPE,상품명,값
 # 팩(PACK),상품명,팩_기준_g(=1팩이 몇 g인지)  ex) 500 / 500g / 0.5kg
 # 박스(BOX),상품명,박스_기준_kg(=1박스가 몇 kg인지) ex) 2 / 2kg / 2000g
 # 개(EA),상품명,1개_기준_g(=1개가 몇 g인지) ex) 1kg / 500g
+#
+# ✅ 출력 규칙(요청 반영):
+# - 팩/개/박스 문구는 표시하지 않고 "숫자만" 표시
+# - BOX(박스) 규칙 있는 상품은 나누기 결과가 1 미만이어도 표시
+#   예) 박스 기준 2kg(=2000g)이고 합계 600g이면 600/2000=0.3 → 30% 로 표시
 
 팩,건대추,500
 팩,양송이,500
@@ -90,7 +93,7 @@ def load_rules_text() -> str:
 박스,적겨자,2
 박스,적근대,2
 
-# 예) 개,깐마늘,1kg  -> 깐마늘 합계 10kg이면 10개로 표시(정수일 때만)
+# 예) 개,깐마늘,1kg  -> 합계 10kg이면 10(숫자만)로 표시(정수일 때만)
 """
 
 
@@ -102,7 +105,7 @@ def save_rules_text(text: str) -> None:
 def parse_rules(text: str):
     pack_rules = {}  # {상품명: {"size_g": float}}
     box_rules = {}   # {상품명: {"size_kg": float}}
-    ea_rules = {}    # {상품명: {"size_g": float}}  # ✅ 1개 기준 g
+    ea_rules = {}    # {상품명: {"size_g": float}}  # 1개 기준 g
 
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -128,8 +131,8 @@ def parse_rules(text: str):
                 if size_kg > 0:
                     box_rules[name] = {"size_kg": size_kg}
 
-            elif typ == "EA":  # ✅ 개 규칙
-                size_g = parse_pack_size_g(val_raw)  # 1kg/500g 등 허용 -> g로
+            elif typ == "EA":
+                size_g = parse_pack_size_g(val_raw)  # 1kg/500g 허용 -> g
                 if size_g > 0:
                     ea_rules[name] = {"size_g": size_g}
 
@@ -302,72 +305,89 @@ def format_weight(grams: float) -> str | None:
     return f"{g}g"
 
 
+def _append_count_parts(parts: list[str], counts: dict):
+    """
+    ✅ 요청 반영:
+    - '팩','개'는 suffix 없이 숫자만 출력
+    - '통','봉'은 기존처럼 suffix 유지
+    """
+    for u in ["개", "팩", "통", "봉"]:
+        v = counts.get(u, 0)
+        if not v:
+            continue
+        if u in ["개", "팩"]:
+            parts.append(f"{v}")      # 숫자만
+        else:
+            parts.append(f"{v}{u}")   # 통/봉은 유지
+
+
 def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
                         allow_decimal_pack: bool, allow_decimal_box: bool) -> str:
     parts = []
 
     if rec["bunch"]:
-        parts.append(f'{rec["bunch"]}단')
+        parts.append(f'{rec["bunch"]}단')  # 단은 유지
 
     grams = rec["grams"]
     counts = dict(rec["counts"])
 
-    # BOX 우선
+    # ---------------- BOX 우선 ----------------
     if product in box_rules and grams > 0:
         box_size_kg = float(box_rules[product]["size_kg"])
-        total_kg = grams / 1000.0
-        boxes = total_kg / box_size_kg
+        denom_g = box_size_kg * 1000.0
+        boxes = grams / denom_g  # 박스 기준으로 나눈 값
 
-        if allow_decimal_box:
-            parts.append(f"{fmt_num(boxes, 2)}박스")
+        # ✅ 1 미만이면 "백분율"로 표시 (예: 600/2000=0.3 -> 30%)
+        if boxes < 1:
+            parts.append(f"{fmt_num(boxes, 2)}")
         else:
-            if abs(boxes - round(boxes)) < 1e-9:
-                parts.append(f"{int(round(boxes))}박스")
+            # 1 이상은 기존 옵션 존중하되, 정수 아니어도 '중량 fallback' 하지 않고 숫자로 표시
+            if allow_decimal_box:
+                parts.append(f"{fmt_num(boxes, 2)}")
             else:
-                w = format_weight(grams)
-                if w:
-                    parts.append(w)
+                if abs(boxes - round(boxes)) < 1e-9:
+                    parts.append(f"{int(round(boxes))}")
+                else:
+                    parts.append(f"{fmt_num(boxes, 2)}")
 
-        for u in ["개", "통", "팩", "봉"]:
-            if counts.get(u, 0):
-                parts.append(f"{counts[u]}{u}")
+        _append_count_parts(parts, counts)
         return " ".join(parts).strip() if parts else "0"
 
-    # PACK / EA 처리
+    # ---------------- PACK / EA 처리 ----------------
     pack_shown = False
     ea_shown = False
 
-    # spec 자체에 팩이 있으면 그걸 우선
+    # spec 자체에 팩이 있으면 우선 (숫자만)
     if counts.get("팩", 0) > 0:
-        parts.append(f'{counts["팩"]}팩')
+        parts.append(f'{counts["팩"]}')
         pack_shown = True
         counts.pop("팩", None)
 
-    # rules로 g -> 팩 변환
+    # rules로 g -> 팩 변환 (숫자만)
     elif product in pack_rules and grams > 0:
         size_g = float(pack_rules[product]["size_g"])
         packs = grams / size_g
         if allow_decimal_pack:
-            parts.append(f"{fmt_num(packs, 2)}팩")
+            parts.append(f"{fmt_num(packs, 2)}")
             pack_shown = True
         else:
             if abs(packs - round(packs)) < 1e-9:
-                parts.append(f"{int(round(packs))}팩")
+                parts.append(f"{int(round(packs))}")
                 pack_shown = True
 
-    # ✅ 팩이 안 잡혔으면 "개" 처리(먼저 spec의 개, 없으면 rules로 환산)
+    # 팩이 안 잡혔으면 "개" 처리(먼저 spec의 개, 없으면 rules로 환산) - 숫자만
     if not pack_shown:
         if counts.get("개", 0) > 0:
-            parts.append(f'{counts["개"]}개')
+            parts.append(f'{counts["개"]}')
             ea_shown = True
             counts.pop("개", None)
 
         elif product in ea_rules and grams > 0:
-            size_g = float(ea_rules[product]["size_g"])  # 1개 기준 g
+            size_g = float(ea_rules[product]["size_g"])
             eas = grams / size_g
-            # ✅ 정수로 딱 떨어질 때만 "개"로 표기 (아니면 중량으로)
+            # 정수로 딱 떨어질 때만 숫자로 표기(아니면 중량 표기)
             if abs(eas - round(eas)) < 1e-9:
-                parts.append(f"{int(round(eas))}개")
+                parts.append(f"{int(round(eas))}")
                 ea_shown = True
 
     # 팩도 개도 안 잡히면 중량으로
@@ -376,10 +396,8 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
         if w:
             parts.append(w)
 
-    # 남은 카운트 단위들
-    for u in ["통", "봉", "개"]:
-        if counts.get(u, 0):
-            parts.append(f"{counts[u]}{u}")
+    # 남은 카운트(통/봉은 suffix 유지, 개/팩은 숫자만)
+    _append_count_parts(parts, counts)
 
     return " ".join(parts).strip() if parts else "0"
 
@@ -401,25 +419,21 @@ def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
 
 
 def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
-    # ✅ 레포 구조: (루트)app.py, (루트)/fonts/NanumGothic.ttf
     font_path = os.path.join("fonts", "NanumGothic.ttf")
     font_name = "NanumGothic"
 
     if not os.path.exists(font_path):
         raise RuntimeError(f"폰트 파일을 못 찾음: {font_path} (fonts 폴더/파일명 확인)")
 
-    # ✅ 폰트 등록 + 패밀리까지 등록
     if font_name not in pdfmetrics.getRegisteredFontNames():
         pdfmetrics.registerFont(TTFont(font_name, font_path))
         pdfmetrics.registerFontFamily(
-            font_name,
-            normal=font_name, bold=font_name, italic=font_name, boldItalic=font_name
+            font_name, normal=font_name, bold=font_name, italic=font_name, boldItalic=font_name
         )
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf,
-        pagesize=landscape(A4),
+        buf, pagesize=landscape(A4),
         leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18
     )
 
@@ -433,8 +447,8 @@ def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
         fontName=font_name,
         fontSize=10,
         leading=12,
-        alignment=1,      # CENTER
-        wordWrap="CJK",   # ✅ 한글 줄바꿈
+        alignment=1,
+        wordWrap="CJK",
     )
 
     header_style = ParagraphStyle(
@@ -450,12 +464,10 @@ def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
 
     safe_df = df.fillna("").astype(str)
 
-    # ✅ 셀을 Paragraph로 감싸야 한글이 안정적으로 적용됨
     header = [Paragraph(str(c), header_style) for c in safe_df.columns]
     body = [[Paragraph(str(v), cell_style) for v in row] for row in safe_df.values.tolist()]
     data = [header] + body
 
-    # 컬럼 폭 자동(가로 A4에 균등 분배)
     page_w, _ = landscape(A4)
     usable_w = page_w - 36
     col_w = usable_w / max(1, len(safe_df.columns))
@@ -490,7 +502,7 @@ with st.sidebar:
     if up is not None:
         st.session_state["rules_text"] = up.getvalue().decode("utf-8", errors="ignore")
 
-    st.text_area("PACK/BOX/EA 규칙", key="rules_text", height=240)
+    st.text_area("PACK/BOX/EA 규칙", key="rules_text", height=260)
 
     colA, colB = st.columns(2)
     with colA:
@@ -502,7 +514,7 @@ with st.sidebar:
         st.markdown("**규칙 추가/업데이트**")
         r_type = st.selectbox("TYPE", ["팩", "개", "박스"])
         r_name = st.text_input("상품명(원본 제품명과 동일)", value="")
-        r_val = st.text_input("값(PACK=1팩 g, BOX=박스 기준 kg, EA=1개 g)", value="")
+        r_val = st.text_input("값(PACK=1팩 g, BOX=1박스 kg, EA=1개 g)", value="")
         submitted = st.form_submit_button("추가/업데이트")
         if submitted:
             st.session_state["rules_text"] = upsert_rule(
@@ -557,7 +569,6 @@ if uploaded:
     st.subheader("제품별 합계")
     st.dataframe(df_wide, use_container_width=True, hide_index=True)
 
-    # PDF 생성(폰트 없으면 에러 표시)
     try:
         pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
         st.download_button(
