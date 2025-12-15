@@ -1,290 +1,203 @@
+import io
 import re
-import difflib
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+from collections import defaultdict
 
-import cv2
-import numpy as np
 import pandas as pd
 import streamlit as st
-from PIL import Image
-import pytesseract
 
-
-# -----------------------------
-# 유틸
-# -----------------------------
-def parse_mapping(text: str) -> Dict[str, str]:
-    """
-    예)
-    로메인=잎로메인
-    바질=스위트바질
-    """
-    mp = {}
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            a, b = line.split("=", 1)
-            a, b = a.strip(), b.strip()
-            if a:
-                mp[a] = b
-    return mp
-
-
-def clean_name(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"[\s\n]+", "", s)
-    s = re.sub(r"[^0-9A-Za-z가-힣]+", "", s)
-    return s
-
-
-def similarity(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(None, a, b).ratio()
-
-
-def correct_with_dictionary(raw: str, dictionary: List[str], threshold: float = 0.55) -> str:
-    """
-    OCR 결과(raw)가 이상하면, dictionary 중 가장 비슷한 상품명으로 보정
-    """
-    raw = clean_name(raw)
-    if not raw or not dictionary:
-        return raw
-
-    best = raw
-    best_score = 0.0
-    for cand in dictionary:
-        cand2 = clean_name(cand)
-        if not cand2:
-            continue
-        sc = similarity(raw, cand2)
-        if sc > best_score:
-            best_score = sc
-            best = cand2
-
-    return best if best_score >= threshold else raw
-
-
-# -----------------------------
-# 빨간 라벨 탐지
-# -----------------------------
-def detect_red_label_boxes(bgr: np.ndarray) -> List[Tuple[int, int, int, int]]:
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-
-    # 빨강은 HSV에서 양 끝에 걸려서 2구간
-    lower1 = np.array([0, 70, 70])
-    upper1 = np.array([10, 255, 255])
-    lower2 = np.array([170, 70, 70])
-    upper2 = np.array([180, 255, 255])
-
-    mask = cv2.inRange(hsv, lower1, upper1) | cv2.inRange(hsv, lower2, upper2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    boxes = []
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        area = w * h
-        ar = w / max(1, h)
-
-        # 라벨 스티커 크기 필터 (사진마다 약간 조정 가능)
-        if area < 2500 or area > 70000:
-            continue
-        if ar < 1.2 or ar > 6.5:
-            continue
-
-        boxes.append((x, y, w, h))
-
-    # 화면에서 보기 좋게 위→아래, 좌→우 정렬
-    boxes = sorted(boxes, key=lambda b: (b[1] // 20, b[0]))
-    return boxes
-
-
-def find_right_boundary(box: Tuple[int, int, int, int], boxes: List[Tuple[int, int, int, int]], img_w: int) -> int:
-    x, y, w, h = box
-    y1, y2 = y, y + h
-
-    candidates = []
-    for xb, yb, wb, hb in boxes:
-        if xb <= x:
-            continue
-        ov = max(0, min(y2, yb + hb) - max(y1, yb))
-        if ov / max(1, min(h, hb)) >= 0.4:
-            candidates.append(xb)
-
-    return min(candidates) if candidates else img_w
-
-
-# -----------------------------
-# OCR (상품명 / 재고)
-# -----------------------------
-def preprocess_otsu(gray: np.ndarray, scale: int = 4) -> np.ndarray:
-    gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return th
-
-
-def preprocess_adaptive(gray: np.ndarray, scale: int = 3) -> np.ndarray:
-    gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                               cv2.THRESH_BINARY, 31, 15)
-    return th
-
-
-def ocr_name_from_box(bgr: np.ndarray, box: Tuple[int, int, int, int], dictionary: List[str]) -> str:
-    x, y, w, h = box
-    pad = 12
-    crop = bgr[y + pad:y + h - pad, x + pad:x + w - pad]
-    if crop.size == 0:
-        return ""
-
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-
-    # 2가지 전처리 결과를 만들어서 더 그럴듯한 걸 선택
-    th1 = preprocess_otsu(gray, scale=4)
-    th2 = preprocess_adaptive(gray, scale=3)
-
-    cand1 = clean_name(pytesseract.image_to_string(th1, lang="kor", config="--oem 1 --psm 7"))
-    cand2 = clean_name(pytesseract.image_to_string(th2, lang="kor", config="--oem 1 --psm 7"))
-
-    # 사전이 있으면: 사전에 가장 잘 맞는 후보를 선택
-    if dictionary:
-        c1 = correct_with_dictionary(cand1, dictionary)
-        c2 = correct_with_dictionary(cand2, dictionary)
-
-        # 원본 후보가 사전에 얼마나 잘 맞는지 점수 비교
-        def best_score(raw: str) -> float:
-            if not raw:
-                return 0.0
-            return max((similarity(raw, d) for d in dictionary), default=0.0)
-
-        return c1 if best_score(c1) >= best_score(c2) else c2
-
-    # 사전이 없으면: 더 “길고 한글 포함” 같은 쪽 선호
-    return cand1 if len(cand1) >= len(cand2) else cand2
-
-
-def ocr_qty_robust(roi_bgr: np.ndarray) -> str:
-    if roi_bgr.size == 0:
-        return ""
-
-    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-    th = preprocess_otsu(gray, scale=4)
-
-    txt = pytesseract.image_to_string(th, lang="eng", config="--oem 1 --psm 6").strip()
-    txt = txt.replace(" ", "").replace("\n", "")
-
-    # 자주 틀리는 문자 교정 (9→Q 같이)
-    trans = str.maketrans({"Q": "9", "O": "0", "o": "0", "S": "5", "I": "1", "l": "1", "Z": "2", "B": "8"})
-    txt = txt.translate(trans)
-
-    m = re.search(r"(\d+(\.\d+)?[kK]?)", txt)
-    return m.group(1) if m else ""
-
-
-def get_qty_roi(bgr: np.ndarray, box: Tuple[int, int, int, int], boxes: List[Tuple[int, int, int, int]]) -> np.ndarray:
-    img_h, img_w = bgr.shape[:2]
-    x, y, w, h = box
-
-    x_start = x + w + 12
-    x_end = find_right_boundary(box, boxes, img_w) - 12
-    if x_end <= x_start:
-        x_end = min(img_w, x_start + 220)
-
-    y_start = max(0, y - 6)
-    y_end = min(img_h, y + h + 6)
-
-    return bgr[y_start:y_end, x_start:x_end]
-
-
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.set_page_config(page_title="재고 인식", layout="wide")
-st.title("빨간 라벨(이름표)만 인식해서 재고 표시 + 상품명 변경")
-
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    image_path = st.text_input("이미지 경로(업로드 없이 로컬 파일 경로)", value="재고.jpg")
-    tesseract_path = st.text_input("Windows라면 tesseract.exe 경로(비우면 자동)", value="")
-    show_debug = st.checkbox("디버그(라벨 박스 표시)", value=True)
-
-    st.caption("※ 예: C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
-
-with col2:
-    dictionary_text = st.text_area(
-        "상품명 사전(선택) — 한 줄에 하나씩. OCR이 틀려도 여기 목록으로 자동 보정",
-        value="고수\n공심채\n빈스\n당귀\n딜\n라디치오\n적환\n로즈마리\n로케트\n모둠\n바질\n베타인\n쏙세러리\n송배추\n애플\n와일드\n로메인\n적겨자\n적근대\n적양파\n쪽리커리\n청경채\n치커리\n케일\n타임\n통로메인\n향나물\n차빌\n",
-        height=220
-    )
-    rename_text = st.text_area(
-        "표시명 변경 규칙(선택) — 원본=변경 (한 줄에 1개)",
-        value="로메인=잎로메인",
-        height=120
-    )
-
-# tesseract 경로 설정
-if tesseract_path.strip():
-    pytesseract.pytesseract.tesseract_cmd = tesseract_path.strip()
-
-# 이미지 로드
+# pdfplumber가 있으면 우선 사용(표/텍스트 추출이 더 안정적)
 try:
-    pil = Image.open(image_path).convert("RGB")
-    bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-except Exception as e:
-    st.error(f"이미지를 열 수 없어요: {e}")
-    st.stop()
+    import pdfplumber  # pip install pdfplumber
+except Exception:
+    pdfplumber = None
 
-boxes = detect_red_label_boxes(bgr)
+# pdfplumber가 없을 때 fallback
+try:
+    from PyPDF2 import PdfReader  # pip install pypdf2
+except Exception:
+    PdfReader = None
 
-# 디버그: 박스 표시
-if show_debug:
-    dbg = bgr.copy()
-    for i, (x, y, w, h) in enumerate(boxes):
-        cv2.rectangle(dbg, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv2.putText(dbg, str(i), (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    st.image(cv2.cvtColor(dbg, cv2.COLOR_BGR2RGB), caption="감지된 빨간 라벨(초록 박스)")
 
-dictionary = [clean_name(x) for x in dictionary_text.splitlines() if clean_name(x)]
-rename_map = parse_mapping(rename_text)
+COUNT_UNITS = ["개", "통", "팩", "봉"]
 
-rows = []
-for box in boxes:
-    raw_name = ocr_name_from_box(bgr, box, dictionary=dictionary)
-    if not raw_name:
-        continue
 
-    # 사전 보정(최종 상품명)
-    name = correct_with_dictionary(raw_name, dictionary) if dictionary else raw_name
+def extract_lines_from_pdf(file_bytes: bytes) -> list[str]:
+    lines: list[str] = []
 
-    # 표시명 변경
-    display_name = rename_map.get(name, name)
+    if pdfplumber is not None:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                for ln in text.splitlines():
+                    ln = ln.strip()
+                    if ln:
+                        lines.append(ln)
+        return lines
 
-    qty_roi = get_qty_roi(bgr, box, boxes)
-    qty = ocr_qty_robust(qty_roi)
+    if PdfReader is None:
+        raise RuntimeError("pdfplumber 또는 pypdf2가 필요합니다. (pip install pdfplumber pypdf2)")
 
-    # 이름만 있고 수량이 빈칸인 경우도 있을 수 있음(체크박스만 있는 줄 등)
-    rows.append({"원본상품명": name, "표시상품명": display_name, "재고": qty})
+    reader = PdfReader(io.BytesIO(file_bytes))
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        for ln in text.splitlines():
+            ln = ln.strip()
+            if ln:
+                lines.append(ln)
+    return lines
 
-df = pd.DataFrame(rows)
 
-st.subheader("재고 결과")
-if df.empty:
-    st.warning("라벨은 찾았는데 OCR 결과가 비었어요. (빛반사/흐림/경로/테서랙트 설정 확인)")
+def parse_items(lines: list[str]) -> list[tuple[str, str, int]]:
+    """
+    반환: (제품명, 구분(예: 500g/2단/10봉), 수량)
+    PDF 추출 결과가
+      - "고수 100g 2" 형태로 한 줄에 붙어있거나
+      - "고수 100g" 다음 줄에 "2" 형태로 분리되어 있어도
+    둘 다 처리
+    """
+    items: list[tuple[str, str, int]] = []
+    pending: tuple[str, str] | None = None
+
+    for ln in lines:
+        if ln in ("▣ 제품별 개수", "제품명 구분 수량"):
+            continue
+
+        # 수량만 단독 줄
+        if re.fullmatch(r"\d+", ln):
+            if pending is not None:
+                product, spec = pending
+                items.append((product, spec, int(ln)))
+                pending = None
+            continue
+
+        # 끝에 수량이 붙어있는 줄: "... 10"
+        m = re.match(r"^(.*?)(?:\s+)(\d+)$", ln)
+        if m:
+            main = m.group(1).strip()
+            qty = int(m.group(2))
+            toks = main.split()
+            product = toks[0]
+            spec = " ".join(toks[1:]) if len(toks) > 1 else ""
+            items.append((product, spec, qty))
+            pending = None
+            continue
+
+        # 아직 수량이 안 나온 줄(다음 줄에서 수량을 받을 수 있음)
+        toks = ln.split()
+        product = toks[0]
+        spec = " ".join(toks[1:]) if len(toks) > 1 else ""
+        pending = (product, spec)
+
+    return items
+
+
+def parse_spec(spec: str):
+    """
+    spec 예:
+      - 500g, 1kg, 1000g
+      - 1단, 2단, 5단
+      - 1개, 2통, 5팩, 10봉
+    반환: (num, unit) or None
+    """
+    if not spec:
+        return None
+
+    s = spec.replace(" ", "").replace(",", "")
+    s = s.replace("㎏", "kg").replace("ＫＧ", "kg").replace("KG", "kg")
+
+    m = re.match(r"^(?P<num>\d+(?:\.\d+)?)(?P<unit>kg|g|단|개|통|팩|봉)$", s)
+    if not m:
+        return None
+    return float(m.group("num")), m.group("unit")
+
+
+def aggregate(items: list[tuple[str, str, int]]):
+    agg = defaultdict(lambda: {"grams": 0, "bunch": 0, "counts": defaultdict(int), "unknown": defaultdict(int)})
+
+    for product, spec, qty in items:
+        parsed = parse_spec(spec)
+        if parsed is None:
+            agg[product]["unknown"][spec] += qty
+            continue
+
+        num, unit = parsed
+
+        if unit == "kg":
+            agg[product]["grams"] += int(round(num * 1000)) * qty
+        elif unit == "g":
+            agg[product]["grams"] += int(round(num)) * qty
+        elif unit == "단":
+            agg[product]["bunch"] += int(round(num)) * qty
+        elif unit in COUNT_UNITS:
+            agg[product]["counts"][unit] += int(round(num)) * qty
+        else:
+            agg[product]["unknown"][spec] += qty
+
+    return agg
+
+
+def format_weight(grams: int) -> str | None:
+    if grams <= 0:
+        return None
+    kg = grams // 1000
+    rem = grams % 1000
+    if kg > 0 and rem == 0:
+        return f"{kg}kg"
+    if kg > 0 and rem > 0:
+        return f"{kg}kg {rem}g"
+    return f"{grams}g"
+
+
+def format_total(rec) -> str:
+    parts = []
+
+    if rec["bunch"]:
+        parts.append(f'{rec["bunch"]}단')
+
+    w = format_weight(rec["grams"])
+    if w:
+        parts.append(w)
+
+    for u in COUNT_UNITS:
+        if rec["counts"].get(u, 0):
+            parts.append(f'{rec["counts"][u]}{u}')
+
+    # 파싱 못한 구분은 그대로 표시(필요 없으면 제거 가능)
+    for spec, qty in rec["unknown"].items():
+        if spec:
+            parts.append(f"{spec}×{qty}")
+
+    return " ".join(parts) if parts else "0"
+
+
+# -------------------- Streamlit UI --------------------
+st.set_page_config(page_title="제품별 수량 합산", layout="wide")
+st.title("제품별 수량 합산(PDF 업로드)")
+
+uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
+
+if uploaded:
+    file_bytes = uploaded.getvalue()
+
+    lines = extract_lines_from_pdf(file_bytes)
+    items = parse_items(lines)
+    agg = aggregate(items)
+
+    rows = []
+    for product in sorted(agg.keys()):
+        rows.append({"제품명": product, "합계": format_total(agg[product])})
+
+    df = pd.DataFrame(rows)
+
+    st.subheader("제품별 합계")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    csv = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "CSV 다운로드",
+        data=csv,
+        file_name="제품별_합계.csv",
+        mime="text/csv",
+    )
 else:
-    # 화면에 보여줄 형태: 표시상품명 / 재고
-    out = df[["표시상품명", "재고"]].copy()
-    out.columns = ["상품명", "재고"]
-    st.dataframe(out, use_container_width=True)
-
-    st.subheader("텍스트 출력(복사해서 사용)")
-    lines = ["상품명 재고"] + [f"{r['상품명']} {r['재고']}".strip() for _, r in out.iterrows()]
-    st.code("\n".join(lines), language="text")
-
-    with st.expander("디버그: 원본상품명/표시상품명/재고 전체"):
-        st.dataframe(df, use_container_width=True)
+    st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면, OCR 처리가 추가로 필요합니다.")
