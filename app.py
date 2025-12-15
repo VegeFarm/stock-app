@@ -569,37 +569,35 @@ if uploaded:
 
     # -------------------- 원본 PDF 페이지별 다운로드(요청 기능) --------------------
     with st.expander("원본 PDF 페이지별 다운로드", expanded=True):
-        try:
-            page_pdfs = split_original_pdf_to_page_pdfs(file_bytes)
-            st.caption(f"파일명 예시: {time_prefix}_1.pdf, {time_prefix}_2.pdf ...")
+    try:
+        page_pdfs = split_original_pdf_to_page_pdfs(file_bytes)
+        st.caption(f"파일명 예시: {time_prefix}_1.pdf, {time_prefix}_2.pdf ...")
 
-            # ZIP 묶음
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for i, pb in enumerate(page_pdfs, start=1):
-                    zf.writestr(f"{time_prefix}_{i}.pdf", pb)
-            zip_buf.seek(0)
+        # ✅ 가로 정렬: 한 줄에 몇 개씩 배치할지
+        per_row = 6
 
-            st.download_button(
-                "원본 페이지 전체 ZIP 다운로드",
-                data=zip_buf.getvalue(),
-                file_name=f"{time_prefix}_pages.zip",
-                mime="application/zip",
-                key="dl_original_zip",
-            )
+        total = len(page_pdfs)
+        for start in range(0, total, per_row):
+            cols = st.columns(per_row)
+            for j in range(per_row):
+                idx = start + j
+                if idx >= total:
+                    break
+                pb = page_pdfs[idx]
+                page_no = idx + 1
+                with cols[j]:
+                    st.download_button(
+                        f"{page_no}",  # 버튼 라벨(작게 숫자만)
+                        data=pb,
+                        file_name=f"{time_prefix}_{page_no}.pdf",
+                        mime="application/pdf",
+                        key=f"dl_original_{page_no}",
+                        use_container_width=True,
+                    )
 
-            # 페이지별 버튼
-            for i, pb in enumerate(page_pdfs, start=1):
-                st.download_button(
-                    f"원본 페이지 {i} 다운로드",
-                    data=pb,
-                    file_name=f"{time_prefix}_{i}.pdf",
-                    mime="application/pdf",
-                    key=f"dl_original_{i}",
-                )
+    except Exception as e:
+        st.error(f"원본 PDF 페이지 분리 실패: {e}")
 
-        except Exception as e:
-            st.error(f"원본 PDF 페이지 분리 실패: {e}")
 
     # -------------------- 기존 기능: 제품별 합계 --------------------
     lines = extract_lines_from_pdf(file_bytes)
@@ -637,3 +635,4 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
