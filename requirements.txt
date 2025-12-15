@@ -2,4 +2,6 @@ streamlit
 pandas
 pdfplumber
 pypdf
+reportlab
+
 
