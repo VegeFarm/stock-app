@@ -1,6 +1,8 @@
 import io
 import os
 import re
+import zipfile
+from datetime import datetime
 from collections import defaultdict
 
 import pandas as pd
@@ -20,13 +22,15 @@ try:
 except Exception:
     pdfplumber = None
 
+# ✅ 원본 PDF 페이지 분리(Writer 필요)
 try:
-    from pypdf import PdfReader  # pip install pypdf
+    from pypdf import PdfReader, PdfWriter  # pip install pypdf
 except Exception:
     try:
-        from PyPDF2 import PdfReader  # fallback
+        from PyPDF2 import PdfReader, PdfWriter  # pip install PyPDF2
     except Exception:
         PdfReader = None
+        PdfWriter = None
 
 COUNT_UNITS = ["개", "통", "팩", "봉"]
 RULES_FILE = "rules.txt"
@@ -131,10 +135,9 @@ def parse_rules(text: str):
                     box_rules[name] = {"size_kg": size_kg}
 
             elif typ == "EA":
-                size_g = parse_pack_size_g(val_raw)  # 1kg/500g 허용 -> g
+                size_g = parse_pack_size_g(val_raw)
                 if size_g > 0:
                     ea_rules[name] = {"size_g": size_g}
-
         except Exception:
             continue
 
@@ -174,7 +177,35 @@ def upsert_rule(text: str, typ: str, name: str, val: str) -> str:
     return "\n".join(out)
 
 
-# -------------------- PDF parsing --------------------
+# -------------------- 원본 PDF 페이지 분리 --------------------
+def split_original_pdf_to_page_pdfs(file_bytes: bytes) -> list[bytes]:
+    """
+    업로드한 '원본 PDF'를 페이지별로 분리해서 각 페이지를 PDF bytes로 반환
+    """
+    if PdfReader is None or PdfWriter is None:
+        raise RuntimeError("원본 PDF 페이지 분리는 pypdf 또는 PyPDF2가 필요합니다. (pip install pypdf)")
+
+    reader = PdfReader(io.BytesIO(file_bytes))
+
+    # 암호화 PDF 대응(빈 비번 시도)
+    try:
+        if getattr(reader, "is_encrypted", False):
+            reader.decrypt("")
+    except Exception:
+        pass
+
+    out_pages: list[bytes] = []
+    for i in range(len(reader.pages)):
+        writer = PdfWriter()
+        writer.add_page(reader.pages[i])
+        buf = io.BytesIO()
+        writer.write(buf)
+        out_pages.append(buf.getvalue())
+
+    return out_pages
+
+
+# -------------------- PDF parsing (텍스트 추출) --------------------
 def extract_lines_from_pdf(file_bytes: bytes) -> list[str]:
     lines: list[str] = []
 
@@ -192,6 +223,12 @@ def extract_lines_from_pdf(file_bytes: bytes) -> list[str]:
         raise RuntimeError("pdfplumber 또는 pypdf(PyPDF2)가 필요합니다. (pip install pdfplumber pypdf)")
 
     reader = PdfReader(io.BytesIO(file_bytes))
+    try:
+        if getattr(reader, "is_encrypted", False):
+            reader.decrypt("")
+    except Exception:
+        pass
+
     for page in reader.pages:
         text = page.extract_text() or ""
         for ln in text.splitlines():
@@ -478,7 +515,6 @@ allow_decimal_box = True
 with st.sidebar:
     st.subheader("표현 규칙(기본값 + 수정 가능)")
 
-    # ✅ 규칙 접기/펼치기
     with st.expander("PACK/BOX/EA 규칙", expanded=False):
         up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
         if up is not None:
@@ -527,6 +563,45 @@ uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
 
 if uploaded:
     file_bytes = uploaded.getvalue()
+
+    # ✅ 업로드 시각 기반 파일명 prefix: 해당시간_1.pdf 형태
+    time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # -------------------- 원본 PDF 페이지별 다운로드(요청 기능) --------------------
+    with st.expander("원본 PDF 페이지별 다운로드", expanded=True):
+        try:
+            page_pdfs = split_original_pdf_to_page_pdfs(file_bytes)
+            st.caption(f"파일명 예시: {time_prefix}_1.pdf, {time_prefix}_2.pdf ...")
+
+            # ZIP 묶음
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for i, pb in enumerate(page_pdfs, start=1):
+                    zf.writestr(f"{time_prefix}_{i}.pdf", pb)
+            zip_buf.seek(0)
+
+            st.download_button(
+                "원본 페이지 전체 ZIP 다운로드",
+                data=zip_buf.getvalue(),
+                file_name=f"{time_prefix}_pages.zip",
+                mime="application/zip",
+                key="dl_original_zip",
+            )
+
+            # 페이지별 버튼
+            for i, pb in enumerate(page_pdfs, start=1):
+                st.download_button(
+                    f"원본 페이지 {i} 다운로드",
+                    data=pb,
+                    file_name=f"{time_prefix}_{i}.pdf",
+                    mime="application/pdf",
+                    key=f"dl_original_{i}",
+                )
+
+        except Exception as e:
+            st.error(f"원본 PDF 페이지 분리 실패: {e}")
+
+    # -------------------- 기존 기능: 제품별 합계 --------------------
     lines = extract_lines_from_pdf(file_bytes)
     items = parse_items(lines)
     agg = aggregate(items)
@@ -552,14 +627,13 @@ if uploaded:
     try:
         pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
         st.download_button(
-            "PDF 다운로드",
+            "PDF 다운로드(제품별 합계)",
             data=pdf_bytes,
             file_name="제품별_합계.pdf",
             mime="application/pdf",
         )
     except Exception as e:
-        st.error(f"PDF 생성 실패: {e}\n\n(해결) fonts/NanumGothic.ttf 경로/파일명 확인")
+        st.error(f"제품별 합계 PDF 생성 실패: {e}\n\n(해결) fonts/NanumGothic.ttf 경로/파일명 확인")
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
-
