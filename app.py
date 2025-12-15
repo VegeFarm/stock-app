@@ -2,7 +2,7 @@ import io
 import os
 import re
 import math
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 import pandas as pd
@@ -38,14 +38,20 @@ except Exception:
 COUNT_UNITS = ["개", "통", "팩", "봉"]
 RULES_FILE = "rules.txt"
 
-# ✅ 제품별 합계 고정 순서(왼쪽 위 -> 오른쪽 아래)
+# ✅ 한국시간(KST) 고정(서버가 UTC여도 파일명은 한국시간)
+KST = timezone(timedelta(hours=9))
+
+def now_prefix_kst() -> str:
+    return datetime.now(KST).strftime("%Y%m%d_%H%M%S")
+
+# ✅ 제품별 합계 고정 순서(표에 항상 먼저, 위→아래 기준)
 FIXED_PRODUCT_ORDER = [
     "고수",
     "공심채",
     "그린빈",
     "당귀",
     "딜",
-    "래디쉬",
+    "적환",
     "로즈마리",
     "로케트",
     "바질",
@@ -53,14 +59,14 @@ FIXED_PRODUCT_ORDER = [
     "비타민",
     "쌈샐러리",
     "쌈추",
-    "애플민트",
+    "애플",
     "와일드",
     "잎로메인",
     "적겨자",
     "적근대",
     "적치커리",
     "청경채",
-    "청치커리",
+    "치커리",
     "케일",
     "타임",
     "통로메인",
@@ -142,7 +148,7 @@ def save_rules_text(text: str) -> None:
 def parse_rules(text: str):
     pack_rules = {}  # {상품명: {"size_g": float}}
     box_rules = {}   # {상품명: {"size_kg": float}}
-    ea_rules = {}    # {상품명: {"size_g": float}}  # 1개 기준 g
+    ea_rules = {}    # {상품명: {"size_g": float}}
 
     for raw in (text or "").splitlines():
         line = raw.strip()
@@ -218,7 +224,7 @@ def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[byt
     zoom: 1.0~3.0 (클수록 선명/용량 증가)
     """
     if fitz is None:
-        raise RuntimeError("스크린샷 저장은 pymupdf가 필요합니다. requirements.txt에 pymupdf 추가하세요.")
+        raise RuntimeError("스크린샷 저장은 pymupdf가 필요합니다. (pip install pymupdf) 또는 requirements.txt에 pymupdf 추가")
 
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     out: list[bytes] = []
@@ -228,6 +234,7 @@ def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[byt
         page = doc.load_page(i)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         out.append(pix.tobytes("png"))
+
     doc.close()
     return out
 
@@ -389,7 +396,7 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
     grams = rec["grams"]
     counts = dict(rec["counts"])
 
-    # BOX 우선: 박스 기준으로 나눈 값(0.3처럼) 표시
+    # BOX 우선: 박스 기준으로 나눈 값(0.3처럼) 표시 (1 미만이어도 항상 표시)
     if product in box_rules and grams > 0:
         box_size_kg = float(box_rules[product]["size_kg"])
         denom_g = box_size_kg * 1000.0
@@ -458,8 +465,6 @@ def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
     ✅ 세로 우선 배치(위→아래), 그 다음 열로 이동
     n=3이면 1열을 위→아래로 다 채운 뒤 2열, 3열 순서
     """
-    
-    # 빈 데이터 처리(문법 오류 안 나는 방식)
     if df is None or len(df) == 0:
         row = {}
         for c in range(n):
@@ -484,7 +489,6 @@ def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
         out.append(row)
 
     return pd.DataFrame(out)
-
 
 
 def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
@@ -604,13 +608,26 @@ uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
 
 if uploaded:
     file_bytes = uploaded.getvalue()
-    time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ✅ 파일명 시간 기준(다운로드/업로드)
+    prefix_mode = st.radio(
+        "스크린샷 파일명 시간 기준",
+        ["다운로드 시각", "업로드 시각(고정)"],
+        horizontal=True,
+        index=0,
+    )
+
+    # 업로드 시각(고정) prefix를 파일별로 저장
+    file_sig = (uploaded.name, len(file_bytes))
+    if st.session_state.get("uploaded_sig") != file_sig:
+        st.session_state["uploaded_sig"] = file_sig
+        st.session_state["uploaded_prefix"] = now_prefix_kst()
 
     # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
     st.subheader("원본 PDF 페이지별 스크린샷 다운로드")
     try:
         zoom = 2.0
-        per_row = 8  # 공간 절약(가로로)
+        per_row = 8  # 공간 절약(가로)
 
         page_images = render_pdf_pages_to_images(file_bytes, zoom=zoom)
         total = len(page_images)
@@ -621,18 +638,23 @@ if uploaded:
                 idx = start + j
                 if idx >= total:
                     break
+
                 page_no = idx + 1
+
+                # ✅ 다운로드 시각 = 이번 실행 시각(KST), 업로드 시각(고정) = 저장된 값
+                prefix = now_prefix_kst() if prefix_mode == "다운로드 시각" else st.session_state["uploaded_prefix"]
+
                 cols[j].download_button(
                     label=str(page_no),
                     data=page_images[idx],
-                    file_name=f"{time_prefix}_{page_no}.png",
+                    file_name=f"{prefix}_{page_no}.png",
                     mime="image/png",
                     key=f"dl_img_{page_no}",
                     use_container_width=True,
                 )
 
     except Exception as e:
-        st.error(f"스크린샷 생성 실패: {e} (requirements.txt에 pymupdf 추가 필요)")
+        st.error(f"스크린샷 생성 실패: {e}")
 
     # ---------- 제품별 합계 ----------
     lines = extract_lines_from_pdf(file_bytes)
@@ -645,15 +667,15 @@ if uploaded:
     # 1) 고정 상품 먼저(없으면 0)
     for product in FIXED_PRODUCT_ORDER:
         if product in agg:
-            total = format_total_custom(
+            total_str = format_total_custom(
                 product, agg[product],
                 pack_rules, box_rules, ea_rules,
                 allow_decimal_pack=allow_decimal_pack,
                 allow_decimal_box=allow_decimal_box
             )
         else:
-            total = "0"
-        rows.append({"제품명": product, "합계": total})
+            total_str = "0"
+        rows.append({"제품명": product, "합계": total_str})
 
     # 2) 나머지 상품 뒤에(가나다)
     rest = [p for p in agg.keys() if p not in fixed_set]
@@ -669,6 +691,8 @@ if uploaded:
         })
 
     df_long = pd.DataFrame(rows)
+
+    # ✅ 화면은 "위→아래" 순서로 보이도록 세로우선 배치
     df_wide = to_3_per_row(df_long, 3)
 
     st.subheader("제품별 합계")
@@ -687,6 +711,3 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
-
-
-
