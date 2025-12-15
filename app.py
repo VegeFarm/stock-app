@@ -483,9 +483,7 @@ if uploaded:
         st.subheader("디버그: 원본 파싱 결과(제품명/구분/수량)")
         st.dataframe(pd.DataFrame(items, columns=["제품명", "구분", "수량"]), use_container_width=True, hide_index=True)
 
-    csv = df_long.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("CSV 다운로드(세로형)", data=csv, file_name="제품별_합계.csv", mime="text/csv")
-
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
 
