@@ -1,6 +1,8 @@
 import io
 import os
 import re
+import zipfile
+from datetime import datetime
 from collections import defaultdict
 
 import pandas as pd
@@ -131,7 +133,7 @@ def parse_rules(text: str):
                     box_rules[name] = {"size_kg": size_kg}
 
             elif typ == "EA":
-                size_g = parse_pack_size_g(val_raw)  # 1kg/500g 허용 -> g
+                size_g = parse_pack_size_g(val_raw)
                 if size_g > 0:
                     ea_rules[name] = {"size_g": size_g}
 
@@ -175,18 +177,28 @@ def upsert_rule(text: str, typ: str, name: str, val: str) -> str:
 
 
 # -------------------- PDF parsing --------------------
-def extract_lines_from_pdf(file_bytes: bytes) -> list[str]:
-    lines: list[str] = []
+def extract_pages_from_pdf(file_bytes: bytes) -> list[list[str]]:
+    """
+    페이지별로 lines를 분리해서 반환:
+    [
+      [page1_line1, page1_line2, ...],
+      [page2_line1, ...],
+      ...
+    ]
+    """
+    pages: list[list[str]] = []
 
     if pdfplumber is not None:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
                 text = page.extract_text() or ""
+                lines = []
                 for ln in text.splitlines():
                     ln = ln.strip()
                     if ln:
                         lines.append(ln)
-        return lines
+                pages.append(lines)
+        return pages
 
     if PdfReader is None:
         raise RuntimeError("pdfplumber 또는 pypdf(PyPDF2)가 필요합니다. (pip install pdfplumber pypdf)")
@@ -194,11 +206,14 @@ def extract_lines_from_pdf(file_bytes: bytes) -> list[str]:
     reader = PdfReader(io.BytesIO(file_bytes))
     for page in reader.pages:
         text = page.extract_text() or ""
+        lines = []
         for ln in text.splitlines():
             ln = ln.strip()
             if ln:
                 lines.append(ln)
-    return lines
+        pages.append(lines)
+
+    return pages
 
 
 def parse_items(lines: list[str]) -> list[tuple[str, str, int]]:
@@ -405,6 +420,13 @@ def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+def make_empty_wide(n: int = 3) -> pd.DataFrame:
+    cols = []
+    for j in range(n):
+        cols += [f"제품명{j+1}", f"합계{j+1}"]
+    return pd.DataFrame(columns=cols)
+
+
 def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
     font_path = os.path.join("fonts", "NanumGothic.ttf")
     font_name = "NanumGothic"
@@ -478,7 +500,6 @@ allow_decimal_box = True
 with st.sidebar:
     st.subheader("표현 규칙(기본값 + 수정 가능)")
 
-    # ✅ 규칙 접기/펼치기
     with st.expander("PACK/BOX/EA 규칙", expanded=False):
         up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
         if up is not None:
@@ -527,38 +548,64 @@ uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
 
 if uploaded:
     file_bytes = uploaded.getvalue()
-    lines = extract_lines_from_pdf(file_bytes)
-    items = parse_items(lines)
-    agg = aggregate(items)
+    pages_lines = extract_pages_from_pdf(file_bytes)
 
-    rows = []
-    for product in sorted(agg.keys()):
-        rows.append({
-            "제품명": product,
-            "합계": format_total_custom(
-                product, agg[product],
-                pack_rules, box_rules, ea_rules,
-                allow_decimal_pack=allow_decimal_pack,
-                allow_decimal_box=allow_decimal_box
-            ),
-        })
+    # ✅ 업로드한 시각 기준 prefix (예: 20251215_203012)
+    time_prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    df_long = pd.DataFrame(rows)
-    df_wide = to_3_per_row(df_long, 3)
+    # 페이지별 PDF를 ZIP으로도 묶기
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        st.subheader("페이지별 결과 & 다운로드")
 
-    st.subheader("제품별 합계")
-    st.dataframe(df_wide, use_container_width=True, hide_index=True)
+        # 먼저 ZIP/개별 파일 준비를 위해 버튼 영역을 위에 보여주고 싶으면 여기 배치해도 됨.
+        for idx, lines in enumerate(pages_lines, start=1):
+            items = parse_items(lines)
+            agg = aggregate(items)
 
-    try:
-        pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
-        st.download_button(
-            "PDF 다운로드",
-            data=pdf_bytes,
-            file_name="제품별_합계.pdf",
-            mime="application/pdf",
-        )
-    except Exception as e:
-        st.error(f"PDF 생성 실패: {e}\n\n(해결) fonts/NanumGothic.ttf 경로/파일명 확인")
+            rows = []
+            for product in sorted(agg.keys()):
+                rows.append({
+                    "제품명": product,
+                    "합계": format_total_custom(
+                        product, agg[product],
+                        pack_rules, box_rules, ea_rules,
+                        allow_decimal_pack=allow_decimal_pack,
+                        allow_decimal_box=allow_decimal_box
+                    ),
+                })
+
+            df_long = pd.DataFrame(rows)
+            df_wide = to_3_per_row(df_long, 3) if len(df_long) else make_empty_wide(3)
+
+            # 화면 표시
+            st.markdown(f"### 페이지 {idx}")
+            st.dataframe(df_wide, use_container_width=True, hide_index=True)
+
+            # PDF 생성 + 다운로드
+            filename = f"{time_prefix}_{idx}.pdf"
+            title = f"{time_prefix}_{idx}"  # PDF 제목도 동일하게
+            try:
+                pdf_bytes = make_pdf_bytes(df_wide, title)
+                st.download_button(
+                    f"PDF 다운로드 (페이지 {idx})",
+                    data=pdf_bytes,
+                    file_name=filename,
+                    mime="application/pdf",
+                    key=f"dl_page_{idx}",
+                )
+                zf.writestr(filename, pdf_bytes)
+            except Exception as e:
+                st.error(f"페이지 {idx} PDF 생성 실패: {e}  (fonts/NanumGothic.ttf 확인)")
+
+    # ZIP 다운로드 (페이지별 PDF 전체)
+    zip_buf.seek(0)
+    st.download_button(
+        "전체 ZIP 다운로드(페이지별 PDF 묶음)",
+        data=zip_buf.getvalue(),
+        file_name=f"{time_prefix}_pages.zip",
+        mime="application/zip",
+    )
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
