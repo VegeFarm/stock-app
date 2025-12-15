@@ -351,12 +351,38 @@ if uploaded:
             "합계": format_total_custom(product, agg[product], pack_rules, box_rules),
         })
 
-    df = pd.DataFrame(rows)
-    st.subheader("제품별 합계")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+df_long = pd.DataFrame(rows)  # 원래 세로 형태(제품명/합계)
 
-    csv = df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("CSV 다운로드", data=csv, file_name="제품별_합계.csv", mime="text/csv")
+# 3개씩 가로로 묶기
+def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
+    out = []
+    for i in range(0, len(df), n):
+        chunk = df.iloc[i:i+n].reset_index(drop=True)
+        row = {}
+        for j in range(n):
+            if j < len(chunk):
+                row[f"제품명{j+1}"] = chunk.loc[j, "제품명"]
+                row[f"합계{j+1}"] = chunk.loc[j, "합계"]
+            else:
+                row[f"제품명{j+1}"] = ""
+                row[f"합계{j+1}"] = ""
+        out.append(row)
+    return pd.DataFrame(out)
+
+df_wide = to_3_per_row(df_long, 3)
+
+st.subheader("제품별 합계 (1행에 3개)")
+st.dataframe(df_wide, use_container_width=True, hide_index=True)
+
+if show_debug:
+    st.subheader("디버그: 원본 파싱 결과(제품명/구분/수량)")
+    st.dataframe(pd.DataFrame(items, columns=["제품명", "구분", "수량"]), use_container_width=True, hide_index=True)
+
+# CSV는 원래 형태(세로)로 다운로드
+csv = df_long.to_csv(index=False).encode("utf-8-sig")
+st.download_button("CSV 다운로드", data=csv, file_name="제품별_합계.csv", mime="text/csv")
+
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR 처리가 필요합니다.")
+
 
