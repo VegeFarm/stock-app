@@ -439,7 +439,8 @@ for tab, cat in zip(tabs, ["재고", "입고", "1차", "2차", "3차"]):
                     help="엑셀에 있는 품목명으로 매핑하세요 (없으면 직접 타이핑도 가능)",
                     options=[""] + excel_products,
                 )
-            }
+            },
+            key=f"editor_{cat}",
         )
 
         # 매핑 저장 반영
@@ -486,4 +487,5 @@ with cB:
             use_container_width=True,
         )
         st.success("반영 완료! 다운로드해서 사용하세요.")
+
 
