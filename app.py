@@ -456,10 +456,16 @@ def format_total_custom(product: str, rec, pack_rules, box_rules, ea_rules,
 def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
     """
     ✅ 세로 우선 배치(위→아래), 그 다음 열로 이동
-    예) n=3이면 1열을 위→아래로 다 채운 뒤 2열, 3열 순서
+    n=3이면 1열을 위→아래로 다 채운 뒤 2열, 3열 순서
     """
+    
+    # 빈 데이터 처리(문법 오류 안 나는 방식)
     if df is None or len(df) == 0:
-        return pd.DataFrame([{f"제품명{i+1}": "", f"합계{i+1}": "" for i in range(n)}])
+        row = {}
+        for c in range(n):
+            row[f"제품명{c+1}"] = ""
+            row[f"합계{c+1}"] = ""
+        return pd.DataFrame([row])
 
     total = len(df)
     rows_count = math.ceil(total / n)
@@ -478,6 +484,7 @@ def to_3_per_row(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
         out.append(row)
 
     return pd.DataFrame(out)
+
 
 
 def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
@@ -680,4 +687,5 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
 
