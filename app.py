@@ -2,7 +2,6 @@ import io
 import os
 import re
 import math
-import zipfile
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
@@ -15,6 +14,12 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import ParagraphStyle
+
+# -------------------- Pillow (merge PNG pages -> one PNG) --------------------
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
 # -------------------- PDF image render (screenshot) --------------------
 try:
@@ -220,7 +225,7 @@ def upsert_rule(text: str, typ: str, name: str, val: str) -> str:
     return "\n".join(out)
 
 
-# -------------------- Original PDF -> Screenshot images --------------------
+# -------------------- PDF -> PNG screenshots --------------------
 def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[bytes]:
     """
     PDF 각 페이지를 PNG 스크린샷으로 렌더링하여 bytes 리스트 반환
@@ -242,13 +247,35 @@ def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[byt
     return out
 
 
-def images_to_zip(img_bytes_list: list[bytes], prefix: str, stem: str = "제품별합계") -> bytes:
-    """PNG 여러 장을 ZIP 1개로 묶어서 다운로드 1버튼으로 제공"""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i, b in enumerate(img_bytes_list, start=1):
-            zf.writestr(f"{prefix}_{stem}_{i}.png", b)
-    return buf.getvalue()
+def merge_png_pages_to_one(png_bytes_list: list[bytes]) -> bytes:
+    """
+    여러 PNG(페이지)를 세로로 이어붙여 1장 PNG로 반환
+    Pillow(PIL) 필요
+    """
+    if not png_bytes_list:
+        return b""
+
+    if len(png_bytes_list) == 1:
+        return png_bytes_list[0]
+
+    if Image is None:
+        # PIL 없으면 첫 페이지만 반환(그래도 'PNG 1개'는 유지)
+        return png_bytes_list[0]
+
+    imgs = [Image.open(io.BytesIO(b)).convert("RGBA") for b in png_bytes_list]
+    max_w = max(im.width for im in imgs)
+    total_h = sum(im.height for im in imgs)
+
+    canvas = Image.new("RGBA", (max_w, total_h), (255, 255, 255, 0))
+    y = 0
+    for im in imgs:
+        x = (max_w - im.width) // 2
+        canvas.paste(im, (x, y))
+        y += im.height
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG", optimize=True)
+    return out.getvalue()
 
 
 # -------------------- PDF text parsing --------------------
@@ -569,7 +596,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("제품별 수량 합산(PDF 업로드)")
+st.title("🧺 제품별 수량 합산(PDF 업로드)")
 
 if "rules_text" not in st.session_state:
     st.session_state["rules_text"] = load_rules_text()
@@ -621,7 +648,7 @@ with st.sidebar:
 
 pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
 
-uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
+uploaded = st.file_uploader("📎 PDF 업로드", type=["pdf"])
 
 if uploaded:
     file_bytes = uploaded.getvalue()
@@ -631,7 +658,6 @@ if uploaded:
     if st.session_state.get("dl_sig") != file_sig:
         st.session_state["dl_sig"] = file_sig
         st.session_state["dl_prefix"] = now_prefix_kst()
-
     fixed_prefix = st.session_state["dl_prefix"]
 
     # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
@@ -705,13 +731,13 @@ if uploaded:
     st.subheader("🧾 제품별 합계")
     st.dataframe(df_wide, use_container_width=True, hide_index=True)
 
-    # ✅ 버튼 2개를 "옆에" 배치: PDF / 스크린샷(PNG)
+    # ✅ 버튼 2개를 "옆에" 배치: PDF / 스크린샷(PNG 1장)
     try:
         pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
 
-        # 제품별 합계 PDF를 PNG로 렌더링 후 ZIP 1개로 묶기
+        # PDF -> PNG 페이지 렌더 -> 1장으로 합치기
         sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
-        png_zip = images_to_zip(sum_imgs, prefix=fixed_prefix, stem="제품별합계")
+        sum_png_one = merge_png_pages_to_one(sum_imgs)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -725,15 +751,18 @@ if uploaded:
         with c2:
             st.download_button(
                 "🖼️ 스크린샷(PNG) 다운로드",
-                data=png_zip,
-                file_name=f"{fixed_prefix}_제품별합계_PNG.zip",
-                mime="application/zip",
+                data=sum_png_one,
+                file_name=f"{fixed_prefix}_제품별합계.png",
+                mime="image/png",
                 use_container_width=True,
             )
+
+        # PIL 없으면 여러 페이지 합치기 불가 안내
+        if Image is None and len(sum_imgs) > 1:
+            st.warning("⚠️ Pillow(PIL)가 없어 제품별합계 스크린샷은 1페이지만 PNG로 저장됩니다. 전체를 1장으로 합치려면 Pillow 설치가 필요합니다.")
 
     except Exception as e:
         st.error(f"제품별 합계 PDF/PNG 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
 
 else:
     st.caption("💡 PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
-
