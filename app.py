@@ -553,7 +553,11 @@ def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
 
 
 # -------------------- Streamlit UI --------------------
-st.set_page_config(page_title="제품별 수량 합산", layout="wide")
+st.set_page_config(
+    page_title="재고프로그램",
+    page_icon="assets/favicon.png",
+    layout="wide"
+)
 st.title("제품별 수량 합산(PDF 업로드)")
 
 if "rules_text" not in st.session_state:
@@ -704,6 +708,7 @@ if uploaded:
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
 
 
 
