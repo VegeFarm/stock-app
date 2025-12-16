@@ -596,7 +596,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🧺 제품별 수량 합산(PDF 업로드)")
+st.title("제품별 수량 합산(PDF 업로드)")
 
 if "rules_text" not in st.session_state:
     st.session_state["rules_text"] = load_rules_text()
@@ -766,3 +766,4 @@ if uploaded:
 
 else:
     st.caption("💡 PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
