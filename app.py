@@ -2,6 +2,7 @@ import io
 import os
 import re
 import math
+import zipfile
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
@@ -223,7 +224,7 @@ def upsert_rule(text: str, typ: str, name: str, val: str) -> str:
 def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[bytes]:
     """
     PDF 각 페이지를 PNG 스크린샷으로 렌더링하여 bytes 리스트 반환
-    zoom: 1.0~3.0 (클수록 선명/용량 증가)
+    zoom: 1.0~3.5 (클수록 선명/용량 증가)
     """
     if fitz is None:
         raise RuntimeError("스크린샷 저장은 pymupdf가 필요합니다. (pip install pymupdf)")
@@ -239,6 +240,15 @@ def render_pdf_pages_to_images(file_bytes: bytes, zoom: float = 2.0) -> list[byt
 
     doc.close()
     return out
+
+
+def images_to_zip(img_bytes_list: list[bytes], prefix: str, stem: str = "제품별합계") -> bytes:
+    """PNG 여러 장을 ZIP 1개로 묶어서 다운로드 1버튼으로 제공"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for i, b in enumerate(img_bytes_list, start=1):
+            zf.writestr(f"{prefix}_{stem}_{i}.png", b)
+    return buf.getvalue()
 
 
 # -------------------- PDF text parsing --------------------
@@ -555,10 +565,11 @@ def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
 # -------------------- Streamlit UI --------------------
 st.set_page_config(
     page_title="재고프로그램",
-    page_icon="assets/favicon.png",
-    layout="wide"
+    page_icon="assets/favicon.png",  # ✅ 로고 파비콘
+    layout="wide",
 )
-st.title("제품별 수량 합산(PDF 업로드)")
+
+st.title("🧺 제품별 수량 합산(PDF 업로드)")
 
 if "rules_text" not in st.session_state:
     st.session_state["rules_text"] = load_rules_text()
@@ -568,9 +579,9 @@ allow_decimal_pack = False
 allow_decimal_box = True
 
 with st.sidebar:
-    st.subheader("표현 규칙(기본값 + 수정 가능)")
+    st.subheader("⚙️ 표현 규칙(기본값 + 수정 가능)")
 
-    with st.expander("PACK/BOX/EA 규칙", expanded=False):
+    with st.expander("🧩 PACK/BOX/EA 규칙", expanded=False):
         up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
         if up is not None:
             st.session_state["rules_text"] = up.getvalue().decode("utf-8", errors="ignore")
@@ -615,8 +626,7 @@ uploaded = st.file_uploader("PDF 업로드", type=["pdf"])
 if uploaded:
     file_bytes = uploaded.getvalue()
 
-    # ✅ 다운로드 시각으로 "고정"되는 prefix (버튼 누르는 순간마다 바뀌지 않게)
-    # - 파일이 바뀌면 새로 생성
+    # ✅ "다운로드 시각"으로 고정되는 prefix (PDF 업로드가 바뀌면 새로 생성)
     file_sig = (uploaded.name, len(file_bytes))
     if st.session_state.get("dl_sig") != file_sig:
         st.session_state["dl_sig"] = file_sig
@@ -625,7 +635,7 @@ if uploaded:
     fixed_prefix = st.session_state["dl_prefix"]
 
     # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
-    st.subheader("원본 PDF 페이지별 스크린샷 다운로드")
+    st.subheader("🖼️ 원본 PDF 페이지별 스크린샷 다운로드")
     try:
         zoom = 2.0
         per_row = 8  # 공간 절약(가로)
@@ -692,52 +702,37 @@ if uploaded:
     # ✅ 화면은 "위→아래" 순서로 보이도록 세로우선 배치
     df_wide = to_3_per_row(df_long, 3)
 
-    st.subheader("제품별 합계")
+    st.subheader("🧾 제품별 합계")
     st.dataframe(df_wide, use_container_width=True, hide_index=True)
 
+    # ✅ 버튼 2개를 "옆에" 배치: PDF / 스크린샷(PNG)
     try:
         pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
-    
-        # ✅ PDF 다운로드
-        st.download_button(
-            "📄 PDF 다운로드(제품별 합계)",
-            data=pdf_bytes,
-            file_name="제품별_합계.pdf",
-            mime="application/pdf",
-        )
-    
-        # ✅ 제품별 합계 “스크린샷(PNG)” 다운로드 (PDF를 이미지로 렌더링)
-        st.subheader("🖼️ 제품별 합계 스크린샷(PNG) 다운로드")
-    
-        # 확대(선명도) 정도: 2.0~3.0 추천
+
+        # 제품별 합계 PDF를 PNG로 렌더링 후 ZIP 1개로 묶기
         sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
-    
-        per_row_sum = 8
-        total_sum = len(sum_imgs)
-        for start in range(0, total_sum, per_row_sum):
-            cols = st.columns(per_row_sum)
-            for j in range(per_row_sum):
-                idx = start + j
-                if idx >= total_sum:
-                    break
-                page_no = idx + 1
-    
-                cols[j].download_button(
-                    label=str(page_no),
-                    data=sum_imgs[idx],
-                    file_name=f"{fixed_prefix}_제품별합계_{page_no}.png",
-                    mime="image/png",
-                    key=f"dl_sum_{page_no}",
-                    use_container_width=True,
-                )
-    
+        png_zip = images_to_zip(sum_imgs, prefix=fixed_prefix, stem="제품별합계")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.download_button(
+                "📄 PDF 다운로드(제품별합계)",
+                data=pdf_bytes,
+                file_name="제품별_합계.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        with c2:
+            st.download_button(
+                "🖼️ 스크린샷(PNG) 다운로드",
+                data=png_zip,
+                file_name=f"{fixed_prefix}_제품별합계_PNG.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
+
     except Exception as e:
-        st.error(f"제품별 합계 PDF/스크린샷 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
+        st.error(f"제품별 합계 PDF/PNG 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
 
 else:
-    st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
-
-
-
-
-
+    st.caption("💡 PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
