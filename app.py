@@ -697,17 +697,46 @@ if uploaded:
 
     try:
         pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
+    
+        # ✅ PDF 다운로드
         st.download_button(
-            "PDF 다운로드(제품별 합계)",
+            "📄 PDF 다운로드(제품별 합계)",
             data=pdf_bytes,
             file_name="제품별_합계.pdf",
             mime="application/pdf",
         )
+    
+        # ✅ 제품별 합계 “스크린샷(PNG)” 다운로드 (PDF를 이미지로 렌더링)
+        st.subheader("🖼️ 제품별 합계 스크린샷(PNG) 다운로드")
+    
+        # 확대(선명도) 정도: 2.0~3.0 추천
+        sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
+    
+        per_row_sum = 8
+        total_sum = len(sum_imgs)
+        for start in range(0, total_sum, per_row_sum):
+            cols = st.columns(per_row_sum)
+            for j in range(per_row_sum):
+                idx = start + j
+                if idx >= total_sum:
+                    break
+                page_no = idx + 1
+    
+                cols[j].download_button(
+                    label=str(page_no),
+                    data=sum_imgs[idx],
+                    file_name=f"{fixed_prefix}_제품별합계_{page_no}.png",
+                    mime="image/png",
+                    key=f"dl_sum_{page_no}",
+                    use_container_width=True,
+                )
+    
     except Exception as e:
-        st.error(f"제품별 합계 PDF 생성 실패: {e} (fonts/NanumGothic.ttf 확인)")
+        st.error(f"제품별 합계 PDF/스크린샷 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
 
 else:
     st.caption("※ PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
+
 
 
 
