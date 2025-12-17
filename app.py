@@ -827,20 +827,25 @@ def render_inventory_page():
     _idx_name = _cols.index("상품명") + 1 if "상품명" in _cols else 1
     _idx_have = _cols.index("보유수량") + 1 if "보유수량" in _cols else 1
 
+    _idx_remain = _cols.index("남은수량") + 1 if "남은수량" in _cols else 1
     st.markdown(
         f"""
         <style>
-/* data_editor 내 특정 열(상품명/보유수량) 글씨를 조금 더 굵게 */
+/* data_editor 내 특정 열(상품명/보유수량/남은수량) 글씨를 더 진하게 */
 div[data-testid="stDataEditor"] div[role="row"] > div[role="gridcell"]:nth-child({_idx_name}),
 div[data-testid="stDataEditor"] div[role="row"] > div[role="gridcell"]:nth-child({_idx_have}),
+div[data-testid="stDataEditor"] div[role="row"] > div[role="gridcell"]:nth-child({_idx_remain}),
 div[data-testid="stDataEditor"] div[role="columnheader"]:nth-child({_idx_name}),
 div[data-testid="stDataEditor"] div[role="columnheader"]:nth-child({_idx_have}),
+div[data-testid="stDataEditor"] div[role="columnheader"]:nth-child({_idx_remain}),
 /* (구버전/브라우저 렌더 차이 대비) */
 div[data-testid="stDataEditor"] tbody tr td:nth-child({_idx_name}),
 div[data-testid="stDataEditor"] tbody tr td:nth-child({_idx_have}),
+div[data-testid="stDataEditor"] tbody tr td:nth-child({_idx_remain}),
 div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_name}),
-div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
-    font-weight: 600;
+div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}),
+div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_remain}) {{
+    font-weight: 700;
 }}
 </style>
         """,
