@@ -856,29 +856,41 @@ def render_inventory_page():
     st.markdown(
         """
         <style>
-        /* 헤더 텍스트 Bold */
-        div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
-        div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
-        div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] .ag-header-cell-text,
-        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
-        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
-        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="남은수량"] .ag-header-cell-text {
+        /* ✅ 헤더(제목) Bold: 상품명/보유수량/남은수량 */
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"],
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"],
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"],
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="상품명"],
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="보유수량"],
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="남은수량"] {
             font-weight: 800 !important;
         }
 
-        /* 셀 값 Bold(폴백) */
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] *,
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] *,
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] *,
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="상품명"] *,
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="보유수량"] *,
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="남은수량"] * {
+            font-weight: 800 !important;
+        }
+
+        /* ✅ 셀 Bold: 표시 텍스트 + 편집 중 input까지 전부 */
         div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
         div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
         div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"],
-        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] .ag-cell-value,
-        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"] .ag-cell-value,
-        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"] .ag-cell-value,
         div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"],
         div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] .ag-cell-value {
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] {
+            font-weight: 800 !important;
+        }
+
+        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] *,
+        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"] *,
+        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"] *,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"] *,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"] *,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] * {
             font-weight: 800 !important;
         }
         </style>
