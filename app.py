@@ -795,17 +795,15 @@ def render_inventory_page():
     # 최초 로드
     if "inventory_df" not in st.session_state:
         st.session_state["inventory_df"] = load_inventory_df()
+    if "inventory_editor_version" not in st.session_state:
+        st.session_state["inventory_editor_version"] = 0
 
-    # 편집기(재고표)는 세션 상태를 우선 사용합니다.
-    # (data_editor의 Disabled 컬럼은 값이 자동으로 갱신되지 않을 수 있어, 세션 상태를 기준으로 스타일/표시를 맞춥니다.)
-    _editor_df = st.session_state.get("inventory_editor")
-    if isinstance(_editor_df, pd.DataFrame):
-        df_view = _editor_df.copy()
-    else:
-        df_view = st.session_state["inventory_df"].copy()
+    # 현재 표시용 DF (항상 계산/정렬된 상태로)
+    df_view = compute_inventory_df(st.session_state["inventory_df"])
+    df_view = sort_inventory_df(df_view).reset_index(drop=True)
+    df_view = df_view[df_view["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
 
-    df_view = compute_inventory_df(df_view)
-    # -------------------- table styling (남은수량 색상 + 굵은 글씨) --------------------
+    # -------------------- 스타일(남은수량 배경색 + 열 굵기) --------------------
     def _remain_bg(v):
         try:
             x = float(v)
@@ -819,7 +817,8 @@ def render_inventory_page():
             return "background-color: #d6ecff;"  # 연파랑
         return ""
 
-    # NOTE: st.data_editor는 pandas.Styler 스타일을 '비편집(Disabled) 컬럼'에만 적용합니다.
+    # NOTE: st.data_editor는 pandas.Styler 스타일을 '비편집(Disabled) 컬럼' 위주로 적용되는 경우가 있어
+    #       상품명/보유수량 열 굵기는 CSS로 한 번 더 보강합니다.
     _cols = list(df_view.columns)
     _idx_name = _cols.index("상품명") + 1 if "상품명" in _cols else 1
     _idx_have = _cols.index("보유수량") + 1 if "보유수량" in _cols else 1
@@ -844,13 +843,16 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
         unsafe_allow_html=True,
     )
 
-    df_styler = df_view.style.applymap(_remain_bg, subset=["남은수량"]).set_properties(
-        subset=["보유수량"],
-        **{"font-weight": "600"},
-    )
+    df_styler = df_view.style.applymap(_remain_bg, subset=["남은수량"])
 
     st.markdown("### 재고표 (수정/추가/삭제 가능)")
-    edited = st.data_editor(
+
+    # 계산값(Disabled 컬럼)이 즉시 반영되도록 '버전 키'를 사용합니다.
+    # (st.session_state[위젯키]를 직접 수정하면 StreamlitAPIException이 발생할 수 있습니다.)
+    ver = int(st.session_state.get("inventory_editor_version", 0))
+    editor_key = f"inventory_editor_{ver}"
+
+    edited_raw = st.data_editor(
         df_styler,
         num_rows="dynamic",
         use_container_width=True,
@@ -867,57 +869,53 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
             "주문수량": st.column_config.NumberColumn("주문수량", format="%g"),
             "남은수량": st.column_config.NumberColumn("남은수량", format="%g"),
         },
-        key="inventory_editor",
+        key=editor_key,
     )
 
-        # 편집 결과 반영 (저장/새로고침 없이도 계산값이 바로 보이도록)
-    # data_editor의 Disabled 컬럼(보유수량/주문수량/남은수량)은 사용자가 수정할 수 없어서
-    # 화면에 표시되는 값이 '이전 값'으로 남는 경우가 있습니다.
-    # -> 편집된 값으로 재계산한 뒤, 계산 컬럼을 session_state에 되돌려 넣어 즉시 갱신합니다.
-    _disabled_cols = ["보유수량", "주문수량", "남은수량"]
+    edited_raw = edited_raw.copy() if isinstance(edited_raw, pd.DataFrame) else pd.DataFrame(edited_raw)
 
-    edited_raw = edited.copy() if isinstance(edited, pd.DataFrame) else pd.DataFrame(edited)
-    edited_calc = compute_inventory_df(edited_raw)
-
-    def _series_equal(a: pd.Series, b: pd.Series) -> bool:
-        aa = pd.to_numeric(a, errors="coerce").fillna(0.0)
-        bb = pd.to_numeric(b, errors="coerce").fillna(0.0)
-        return aa.equals(bb)
-
-    _need_sync = False
-    for _c in _disabled_cols:
-        if _c in edited_raw.columns and _c in edited_calc.columns:
-            if not _series_equal(edited_raw[_c], edited_calc[_c]):
-                _need_sync = True
-                break
-
-    if _need_sync:
-        patched = edited_raw.copy()
-        for _c in _disabled_cols:
-            if _c in edited_calc.columns:
-                patched[_c] = edited_calc[_c].values
-        st.session_state["inventory_editor"] = patched
-        st.rerun()
-
-    edited = edited_calc
-    edited = edited[edited["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
-
-    df_new = compute_inventory_df(edited)
+    # 입력/수정 즉시 계산(보유수량/주문수량/남은수량) 반영
+    df_new = compute_inventory_df(edited_raw)
     df_new = sort_inventory_df(df_new).reset_index(drop=True)
+    df_new = df_new[df_new["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+
+    # ---------- 변경 감지(편집 컬럼만 비교) ----------
+    def _base_view(df: pd.DataFrame) -> pd.DataFrame:
+        base_cols = ["상품명", "재고", "입고", "1차", "2차", "3차"]
+        dd = df.copy()
+        for c in base_cols:
+            if c not in dd.columns:
+                dd[c] = "" if c == "상품명" else 0
+        dd["상품명"] = dd["상품명"].fillna("").astype(str).str.strip()
+        for c in ["재고", "입고", "1차", "2차", "3차"]:
+            dd[c] = pd.to_numeric(dd[c], errors="coerce").fillna(0.0)
+        return dd[base_cols].reset_index(drop=True)
+
+    need_refresh_editor = False
+    current_base = _base_view(df_view)
+    new_base = _base_view(df_new)
+
+    if not current_base.equals(new_base):
+        # 세션 상태의 재고표를 최신 편집값으로 갱신(화면 계산은 즉시)
+        st.session_state["inventory_df"] = df_new
+        st.session_state["inventory_editor_version"] = ver + 1
+        need_refresh_editor = True
 
     # 중복 상품명 경고(원하면 나중에 '자동 합치기' 옵션 추가 가능)
     dup = df_new["상품명"][df_new["상품명"].duplicated(keep=False)]
     if len(dup) > 0:
         st.warning(f"⚠️ 상품명이 중복된 행이 있습니다: {', '.join(sorted(set(dup.astype(str))))}")
 
-    # 저장/다운로드
+    # 저장/다운로드 (버튼 3개 동일 폭)
     colA, colB, colC = st.columns([1, 1, 1])
+
     if colA.button("💾 저장", use_container_width=True):
         st.session_state["inventory_df"] = df_new
         save_inventory_df(df_new)
         st.success("저장 완료!")
-
+        # 저장 후에는 그대로 새로고침
         st.rerun()
+
     if colB.button("↻ 초기화(0으로)", use_container_width=True):
         base = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
         base = compute_inventory_df(base)
@@ -935,6 +933,10 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+
+    # 마지막에 에디터를 한 번 더 리렌더링해서(버전키 변경) 계산값이 즉시 표시되게 함
+    if need_refresh_editor:
+        st.rerun()
 
 
 def render_pdf_page():
