@@ -589,6 +589,7 @@ def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
     return buf.getvalue()
 
 
+
 # -------------------- Streamlit UI --------------------
 st.set_page_config(
     page_title="재고프로그램",
@@ -596,174 +597,408 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("제품별 수량 합산(PDF 업로드)")
-
-if "rules_text" not in st.session_state:
-    st.session_state["rules_text"] = load_rules_text()
-
-# 기본값
-allow_decimal_pack = False
-allow_decimal_box = True
+# ----- Navigation -----
+if "page" not in st.session_state:
+    st.session_state["page"] = "pdf_sum"
 
 with st.sidebar:
-    st.subheader("⚙️ 표현 규칙(기본값 + 수정 가능)")
+    st.markdown("## 📌 메뉴")
+    if st.button("📄 PDF 제품별합계", use_container_width=True):
+        st.session_state["page"] = "pdf_sum"
+        st.rerun()
+    if st.button("📦 재고관리", use_container_width=True):
+        st.session_state["page"] = "inventory"
+        st.rerun()
+    st.divider()
 
-    with st.expander("🧩 PACK/BOX/EA 규칙", expanded=False):
-        up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
-        if up is not None:
-            st.session_state["rules_text"] = up.getvalue().decode("utf-8", errors="ignore")
 
-        st.text_area("규칙", key="rules_text", height=260)
+INVENTORY_FILE = "inventory.csv"
 
-        colA, colB = st.columns(2)
-        allow_decimal_pack = colA.checkbox("팩 소수 허용", value=False)
-        allow_decimal_box = colB.checkbox("박스 소수 허용", value=True)
+INVENTORY_COLUMNS = [
+    "상품명",
+    "재고",
+    "입고",
+    "보유수량",
+    "1차",
+    "2차",
+    "3차",
+    "주문수량",
+    "남은수량",
+]
 
-        with st.form("add_rule_form", clear_on_submit=False):
-            st.markdown("**규칙 추가/업데이트**")
-            r_type = st.selectbox("TYPE", ["팩", "개", "박스"])
-            r_name = st.text_input("상품명(원본 제품명과 동일)", value="")
-            r_val = st.text_input("값(PACK=1팩 g, BOX=1박스 kg, EA=1개 g)", value="")
-            submitted = st.form_submit_button("추가/업데이트")
-            if submitted:
-                st.session_state["rules_text"] = upsert_rule(
-                    st.session_state["rules_text"], r_type, r_name, r_val
+
+def _coerce_int_series(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
+
+
+def compute_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # 기본 스키마 보정
+    if "상품명" not in df.columns:
+        df.insert(0, "상품명", "")
+
+    for col in ["재고", "입고", "1차", "2차", "3차"]:
+        if col not in df.columns:
+            df[col] = 0
+
+    # 숫자 정리
+    for col in ["재고", "입고", "1차", "2차", "3차"]:
+        df[col] = _coerce_int_series(df[col])
+
+    # 공백 상품명 제거(단, 사용자가 편집중인 빈 행은 data_editor가 처리)
+    df["상품명"] = df["상품명"].fillna("").astype(str).str.strip()
+
+    df["보유수량"] = df["재고"] + df["입고"]
+    df["주문수량"] = df["1차"] + df["2차"] + df["3차"]
+    df["남은수량"] = df["보유수량"] - df["주문수량"]
+
+    return df[INVENTORY_COLUMNS]
+
+
+def sort_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    fixed = FIXED_PRODUCT_ORDER
+    fixed_index = {name: i for i, name in enumerate(fixed)}
+
+    def _rank(name: str) -> int:
+        return fixed_index.get(name, 10_000)
+
+    df["__rank"] = df["상품명"].apply(lambda x: _rank(str(x).strip()))
+    # 고정목록 먼저, 나머지는 상품명 가나다
+    df = df.sort_values(by=["__rank", "상품명"], kind="mergesort").drop(columns=["__rank"])
+    return df
+
+
+def load_inventory_df() -> pd.DataFrame:
+    # 1) 파일 있으면 로드
+    if os.path.exists(INVENTORY_FILE):
+        try:
+            df = pd.read_csv(INVENTORY_FILE, encoding="utf-8-sig")
+        except Exception:
+            df = pd.read_csv(INVENTORY_FILE, encoding="utf-8", errors="ignore")
+    else:
+        df = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
+
+    # 2) 고정 상품이 빠져있으면 추가
+    existing = set(df.get("상품명", pd.Series(dtype=str)).fillna("").astype(str).str.strip())
+    missing = [p for p in FIXED_PRODUCT_ORDER if p not in existing]
+    if missing:
+        df = pd.concat([df, pd.DataFrame({"상품명": missing})], ignore_index=True)
+
+    df = compute_inventory_df(df)
+    df = sort_inventory_df(df)
+
+    # 3) 완전히 빈 상품명 행 제거
+    df = df[df["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+    return df
+
+
+def save_inventory_df(df: pd.DataFrame) -> None:
+    # 저장은 계산된 전체 컬럼 그대로 저장
+    df.to_csv(INVENTORY_FILE, index=False, encoding="utf-8-sig")
+
+
+def inventory_df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="재고표")
+        ws = writer.sheets["재고표"]
+        ws.freeze_panes = "B2"
+        # 간단한 열 너비
+        widths = {
+            "A": 16, "B": 8, "C": 8, "D": 10,
+            "E": 8, "F": 8, "G": 8, "H": 10, "I": 10
+        }
+        for col, w in widths.items():
+            ws.column_dimensions[col].width = w
+    return buf.getvalue()
+
+
+def style_inventory_preview(df: pd.DataFrame):
+    # 남은수량 색상(음수=빨강, 0=연핑크, 양수=연하늘)
+    def _cell_style(val):
+        try:
+            v = int(val)
+        except Exception:
+            return ""
+        if v < 0:
+            return "background-color: #ffb3b3; font-weight: 700;"
+        if v == 0:
+            return "background-color: #ffe4e4;"
+        return "background-color: #d9f3ff;"
+    return df.style.applymap(_cell_style, subset=["남은수량"])
+
+
+def render_inventory_page():
+    st.title("재고관리")
+
+    # 최초 로드
+    if "inventory_df" not in st.session_state:
+        st.session_state["inventory_df"] = load_inventory_df()
+
+    df = st.session_state["inventory_df"].copy()
+
+    # 검색(필터)
+    q = st.text_input("🔎 상품명 검색", value="", placeholder="예: 잎로메인")
+    if q.strip():
+        df_view = df[df["상품명"].astype(str).str.contains(q.strip(), case=False, na=False)].copy()
+    else:
+        df_view = df
+
+    # 요약
+    c1, c2, c3 = st.columns(3)
+    c1.metric("총 보유수량", int(df_view["보유수량"].sum()))
+    c2.metric("총 주문수량", int(df_view["주문수량"].sum()))
+    c3.metric("총 남은수량", int(df_view["남은수량"].sum()))
+
+    st.markdown("### 재고표 (수정/추가/삭제 가능)")
+    edited = st.data_editor(
+        df_view,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        disabled=["보유수량", "주문수량", "남은수량"],
+        column_config={
+            "상품명": st.column_config.TextColumn("상품명", required=True),
+            "재고": st.column_config.NumberColumn("재고", min_value=0, step=1, format="%d"),
+            "입고": st.column_config.NumberColumn("입고", min_value=0, step=1, format="%d"),
+            "보유수량": st.column_config.NumberColumn("보유수량", format="%d"),
+            "1차": st.column_config.NumberColumn("1차", min_value=0, step=1, format="%d"),
+            "2차": st.column_config.NumberColumn("2차", min_value=0, step=1, format="%d"),
+            "3차": st.column_config.NumberColumn("3차", min_value=0, step=1, format="%d"),
+            "주문수량": st.column_config.NumberColumn("주문수량", format="%d"),
+            "남은수량": st.column_config.NumberColumn("남은수량", format="%d"),
+        },
+        key="inventory_editor",
+    )
+
+    # 편집 결과를 원본 df에 반영(검색 필터 중일 때도 안전하게)
+    #  - edited 는 df_view 기반이므로, 상품명 기준으로 merge/update
+    edited = compute_inventory_df(edited)
+    edited = edited[edited["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+
+    if q.strip():
+        # df에서 해당 상품명들만 교체 + 새로 추가된 상품은 append
+        names_view = set(df_view["상품명"].astype(str))
+        df_rest = df[~df["상품명"].astype(str).isin(names_view)].copy()
+        df_new = pd.concat([df_rest, edited], ignore_index=True)
+    else:
+        df_new = edited
+
+    df_new = compute_inventory_df(df_new)
+    df_new = sort_inventory_df(df_new).reset_index(drop=True)
+
+    # 중복 상품명 경고(원하면 나중에 '자동 합치기' 옵션 추가 가능)
+    dup = df_new["상품명"][df_new["상품명"].duplicated(keep=False)]
+    if len(dup) > 0:
+        st.warning(f"⚠️ 상품명이 중복된 행이 있습니다: {', '.join(sorted(set(dup.astype(str))))}")
+
+    # 저장/다운로드
+    colA, colB, colC = st.columns([1, 1, 2])
+    if colA.button("💾 저장", use_container_width=True):
+        st.session_state["inventory_df"] = df_new
+        save_inventory_df(df_new)
+        st.success("저장 완료!")
+
+    if colB.button("↻ 초기화(0으로)", use_container_width=True):
+        base = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
+        base = compute_inventory_df(base)
+        base = sort_inventory_df(base).reset_index(drop=True)
+        st.session_state["inventory_df"] = base
+        save_inventory_df(base)
+        st.success("초기화 완료!")
+        st.rerun()
+
+    xlsx_bytes = inventory_df_to_xlsx_bytes(df_new)
+    colC.download_button(
+        "⬇️ 엑셀 다운로드(.xlsx)",
+        data=xlsx_bytes,
+        file_name=f"재고표_{now_prefix_kst()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    st.markdown("### 미리보기(색상/디자인)")
+    st.dataframe(style_inventory_preview(df_new), use_container_width=True, hide_index=True)
+
+def render_pdf_page():
+    st.title("제품별 수량 합산(PDF 업로드)")
+
+    if "rules_text" not in st.session_state:
+        st.session_state["rules_text"] = load_rules_text()
+
+    # 기본값
+    allow_decimal_pack = False
+    allow_decimal_box = True
+
+    with st.sidebar:
+        st.subheader("⚙️ 표현 규칙(기본값 + 수정 가능)")
+
+        with st.expander("🧩 PACK/BOX/EA 규칙", expanded=False):
+            up = st.file_uploader("rules.txt 업로드(선택)", type=["txt"])
+            if up is not None:
+                st.session_state["rules_text"] = up.getvalue().decode("utf-8", errors="ignore")
+
+            st.text_area("규칙", key="rules_text", height=260)
+
+            colA, colB = st.columns(2)
+            allow_decimal_pack = colA.checkbox("팩 소수 허용", value=False)
+            allow_decimal_box = colB.checkbox("박스 소수 허용", value=True)
+
+            with st.form("add_rule_form", clear_on_submit=False):
+                st.markdown("**규칙 추가/업데이트**")
+                r_type = st.selectbox("TYPE", ["팩", "개", "박스"])
+                r_name = st.text_input("상품명(원본 제품명과 동일)", value="")
+                r_val = st.text_input("값(PACK=1팩 g, BOX=1박스 kg, EA=1개 g)", value="")
+                submitted = st.form_submit_button("추가/업데이트")
+                if submitted:
+                    st.session_state["rules_text"] = upsert_rule(
+                        st.session_state["rules_text"], r_type, r_name, r_val
+                    )
+                    st.success("규칙 반영 완료!")
+
+            col1, col2 = st.columns(2)
+            if col1.button("rules.txt로 저장(로컬용)"):
+                try:
+                    save_rules_text(st.session_state["rules_text"])
+                    st.success("rules.txt 저장 완료!")
+                except Exception as e:
+                    st.error(f"저장 실패: {e}")
+
+            col2.download_button(
+                "rules.txt 다운로드",
+                data=st.session_state["rules_text"].encode("utf-8"),
+                file_name="rules.txt",
+                mime="text/plain",
+            )
+
+    pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
+
+    uploaded = st.file_uploader("📎 PDF 업로드", type=["pdf"])
+
+    if uploaded:
+        file_bytes = uploaded.getvalue()
+
+        # ✅ "다운로드 시각"으로 고정되는 prefix (PDF 업로드가 바뀌면 새로 생성)
+        file_sig = (uploaded.name, len(file_bytes))
+        if st.session_state.get("dl_sig") != file_sig:
+            st.session_state["dl_sig"] = file_sig
+            st.session_state["dl_prefix"] = now_prefix_kst()
+        fixed_prefix = st.session_state["dl_prefix"]
+
+        # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
+        st.subheader("🖼️ 원본 PDF 페이지별 스크린샷 다운로드")
+        try:
+            zoom = 2.0
+            per_row = 8  # 공간 절약(가로)
+
+            page_images = render_pdf_pages_to_images(file_bytes, zoom=zoom)
+            total = len(page_images)
+
+            for start in range(0, total, per_row):
+                cols = st.columns(per_row)
+                for j in range(per_row):
+                    idx = start + j
+                    if idx >= total:
+                        break
+
+                    page_no = idx + 1
+                    cols[j].download_button(
+                        label=str(page_no),
+                        data=page_images[idx],
+                        file_name=f"{fixed_prefix}_{page_no}.png",
+                        mime="image/png",
+                        key=f"dl_img_{page_no}",
+                        use_container_width=True,
+                    )
+
+        except Exception as e:
+            st.error(f"스크린샷 생성 실패: {e}")
+
+        # ---------- 제품별 합계 ----------
+        lines = extract_lines_from_pdf(file_bytes)
+        items = parse_items(lines)
+        agg = aggregate(items)
+
+        rows = []
+        fixed_set = set(FIXED_PRODUCT_ORDER)
+
+        # 1) 고정 상품 먼저(없으면 0)
+        for product in FIXED_PRODUCT_ORDER:
+            if product in agg:
+                total_str = format_total_custom(
+                    product, agg[product],
+                    pack_rules, box_rules, ea_rules,
+                    allow_decimal_pack=allow_decimal_pack,
+                    allow_decimal_box=allow_decimal_box
                 )
-                st.success("규칙 반영 완료!")
+            else:
+                total_str = "0"
+            rows.append({"제품명": product, "합계": total_str})
 
-        col1, col2 = st.columns(2)
-        if col1.button("rules.txt로 저장(로컬용)"):
-            try:
-                save_rules_text(st.session_state["rules_text"])
-                st.success("rules.txt 저장 완료!")
-            except Exception as e:
-                st.error(f"저장 실패: {e}")
+        # 2) 나머지 상품 뒤에(가나다)
+        rest = [p for p in agg.keys() if p not in fixed_set]
+        for product in sorted(rest):
+            rows.append({
+                "제품명": product,
+                "합계": format_total_custom(
+                    product, agg[product],
+                    pack_rules, box_rules, ea_rules,
+                    allow_decimal_pack=allow_decimal_pack,
+                    allow_decimal_box=allow_decimal_box
+                ),
+            })
 
-        col2.download_button(
-            "rules.txt 다운로드",
-            data=st.session_state["rules_text"].encode("utf-8"),
-            file_name="rules.txt",
-            mime="text/plain",
-        )
+        df_long = pd.DataFrame(rows)
 
-pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
+        # ✅ 화면은 "위→아래" 순서로 보이도록 세로우선 배치
+        df_wide = to_3_per_row(df_long, 3)
 
-uploaded = st.file_uploader("📎 PDF 업로드", type=["pdf"])
+        st.subheader("🧾 제품별 합계")
+        st.dataframe(df_wide, use_container_width=True, hide_index=True)
 
-if uploaded:
-    file_bytes = uploaded.getvalue()
+        # ✅ 버튼 2개를 "옆에" 배치: PDF / 스크린샷(PNG 1장)
+        try:
+            pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
 
-    # ✅ "다운로드 시각"으로 고정되는 prefix (PDF 업로드가 바뀌면 새로 생성)
-    file_sig = (uploaded.name, len(file_bytes))
-    if st.session_state.get("dl_sig") != file_sig:
-        st.session_state["dl_sig"] = file_sig
-        st.session_state["dl_prefix"] = now_prefix_kst()
-    fixed_prefix = st.session_state["dl_prefix"]
+            # PDF -> PNG 페이지 렌더 -> 1장으로 합치기
+            sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
+            sum_png_one = merge_png_pages_to_one(sum_imgs)
 
-    # ---------- 원본 PDF -> 페이지별 스크린샷(PNG) 다운로드 ----------
-    st.subheader("🖼️ 원본 PDF 페이지별 스크린샷 다운로드")
-    try:
-        zoom = 2.0
-        per_row = 8  # 공간 절약(가로)
-
-        page_images = render_pdf_pages_to_images(file_bytes, zoom=zoom)
-        total = len(page_images)
-
-        for start in range(0, total, per_row):
-            cols = st.columns(per_row)
-            for j in range(per_row):
-                idx = start + j
-                if idx >= total:
-                    break
-
-                page_no = idx + 1
-                cols[j].download_button(
-                    label=str(page_no),
-                    data=page_images[idx],
-                    file_name=f"{fixed_prefix}_{page_no}.png",
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button(
+                    "📄 PDF 다운로드(제품별합계)",
+                    data=pdf_bytes,
+                    file_name="제품별_합계.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with c2:
+                st.download_button(
+                    "🖼️ 스크린샷(PNG) 다운로드",
+                    data=sum_png_one,
+                    file_name=f"{fixed_prefix}_제품별합계.png",
                     mime="image/png",
-                    key=f"dl_img_{page_no}",
                     use_container_width=True,
                 )
 
-    except Exception as e:
-        st.error(f"스크린샷 생성 실패: {e}")
+            # PIL 없으면 여러 페이지 합치기 불가 안내
+            if Image is None and len(sum_imgs) > 1:
+                st.warning("⚠️ Pillow(PIL)가 없어 제품별합계 스크린샷은 1페이지만 PNG로 저장됩니다. 전체를 1장으로 합치려면 Pillow 설치가 필요합니다.")
 
-    # ---------- 제품별 합계 ----------
-    lines = extract_lines_from_pdf(file_bytes)
-    items = parse_items(lines)
-    agg = aggregate(items)
+        except Exception as e:
+            st.error(f"제품별 합계 PDF/PNG 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
 
-    rows = []
-    fixed_set = set(FIXED_PRODUCT_ORDER)
+    else:
+        st.caption("💡 PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
 
-    # 1) 고정 상품 먼저(없으면 0)
-    for product in FIXED_PRODUCT_ORDER:
-        if product in agg:
-            total_str = format_total_custom(
-                product, agg[product],
-                pack_rules, box_rules, ea_rules,
-                allow_decimal_pack=allow_decimal_pack,
-                allow_decimal_box=allow_decimal_box
-            )
-        else:
-            total_str = "0"
-        rows.append({"제품명": product, "합계": total_str})
 
-    # 2) 나머지 상품 뒤에(가나다)
-    rest = [p for p in agg.keys() if p not in fixed_set]
-    for product in sorted(rest):
-        rows.append({
-            "제품명": product,
-            "합계": format_total_custom(
-                product, agg[product],
-                pack_rules, box_rules, ea_rules,
-                allow_decimal_pack=allow_decimal_pack,
-                allow_decimal_box=allow_decimal_box
-            ),
-        })
 
-    df_long = pd.DataFrame(rows)
 
-    # ✅ 화면은 "위→아래" 순서로 보이도록 세로우선 배치
-    df_wide = to_3_per_row(df_long, 3)
-
-    st.subheader("🧾 제품별 합계")
-    st.dataframe(df_wide, use_container_width=True, hide_index=True)
-
-    # ✅ 버튼 2개를 "옆에" 배치: PDF / 스크린샷(PNG 1장)
-    try:
-        pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
-
-        # PDF -> PNG 페이지 렌더 -> 1장으로 합치기
-        sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
-        sum_png_one = merge_png_pages_to_one(sum_imgs)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.download_button(
-                "📄 PDF 다운로드(제품별합계)",
-                data=pdf_bytes,
-                file_name="제품별_합계.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        with c2:
-            st.download_button(
-                "🖼️ 스크린샷(PNG) 다운로드",
-                data=sum_png_one,
-                file_name=f"{fixed_prefix}_제품별합계.png",
-                mime="image/png",
-                use_container_width=True,
-            )
-
-        # PIL 없으면 여러 페이지 합치기 불가 안내
-        if Image is None and len(sum_imgs) > 1:
-            st.warning("⚠️ Pillow(PIL)가 없어 제품별합계 스크린샷은 1페이지만 PNG로 저장됩니다. 전체를 1장으로 합치려면 Pillow 설치가 필요합니다.")
-
-    except Exception as e:
-        st.error(f"제품별 합계 PDF/PNG 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
-
+# ----- Page Router -----
+if st.session_state.get("page") == "inventory":
+    render_inventory_page()
 else:
-    st.caption("💡 PDF가 스캔본(이미지)이라 텍스트 추출이 안 되면 OCR이 필요합니다.")
-
+    render_pdf_page()
