@@ -854,36 +854,54 @@ def render_inventory_page():
     #       상품명/보유수량 열 굵기는 CSS로 한 번 더 보강합니다.
     # data_editor(AG Grid)에서 특정 컬럼(상품명/보유수량/남은수량) 글씨를 확실히 Bold 처리(헤더+셀)
     st.markdown(
-        """
-        <style>
-        /* 헤더 텍스트 Bold */
-        div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
-        div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
-        div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] .ag-header-cell-text,
-        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
-        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
-        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="남은수량"] .ag-header-cell-text {
-            font-weight: 800 !important;
-        }
+    """
+    <style>
+    /* ===== 재고표: 헤더/셀 굵게(상품명/보유수량/남은수량) ===== */
+    div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
+    div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
+    div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] .ag-header-cell-text,
+    div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] .ag-cell-label-container .ag-header-cell-text,
+    div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] .ag-cell-label-container .ag-header-cell-text,
+    div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] .ag-cell-label-container .ag-header-cell-text,
+    div[data-testid="stDataFrame"]  .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
+    div[data-testid="stDataFrame"]  .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
+    div[data-testid="stDataFrame"]  .ag-header-cell[col-id="남은수량"] .ag-header-cell-text,
+    div[data-testid="stDataFrame"]  .ag-header-cell[col-id="상품명"] .ag-cell-label-container .ag-header-cell-text,
+    div[data-testid="stDataFrame"]  .ag-header-cell[col-id="보유수량"] .ag-cell-label-container .ag-header-cell-text,
+    div[data-testid="stDataFrame"]  .ag-header-cell[col-id="남은수량"] .ag-cell-label-container .ag-header-cell-text {
+        font-weight: 800 !important;
+    }
 
-        /* 셀 값 Bold(폴백) */
-        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
-        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
-        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"],
-        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] .ag-cell-value,
-        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"] .ag-cell-value,
-        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] .ag-cell-value {
-            font-weight: 800 !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
+    div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
+    div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
+    div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"],
+    div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] *,
+    div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"] *,
+    div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"] *,
+    div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"],
+    div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"],
+    div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"],
+    div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"] *,
+    div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"] *,
+    div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] * {
+        font-weight: 800 !important;
+    }
+
+    /* ===== 재고표: 표 안 데이터 전체 왼쪽 정렬 ===== */
+    div[data-testid="stDataEditor"] .ag-cell,
+    div[data-testid="stDataEditor"] .ag-cell-value,
+    div[data-testid="stDataEditor"] .ag-cell-wrapper,
+    div[data-testid="stDataEditor"] .ag-header-cell-text,
+    div[data-testid="stDataFrame"]  .ag-cell,
+    div[data-testid="stDataFrame"]  .ag-cell-value,
+    div[data-testid="stDataFrame"]  .ag-cell-wrapper,
+    div[data-testid="stDataFrame"]  .ag-header-cell-text {
+        text-align: left !important;
+        justify-content: flex-start !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
     )
 
     df_styler = (
