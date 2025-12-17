@@ -800,14 +800,53 @@ def render_inventory_page():
     df = compute_inventory_df(df)
     df_view = df
 
-    # 요약
-    c1, c2 = st.columns(2)
-    c1.metric("총 주문수량", fmt_num(float(df_view["주문수량"].sum()), 2))
-    c2.metric("총 남은수량", fmt_num(float(df_view["남은수량"].sum()), 2))
+    # -------------------- table styling (남은수량 색상 + 굵은 글씨) --------------------
+    def _remain_bg(v):
+        try:
+            x = float(v)
+        except Exception:
+            return ""
+        if x < 0:
+            return "background-color: #ff3b3b;"  # 빨강
+        if 0 <= x <= 10:
+            return "background-color: #ffd6e7;"  # 연분홍
+        if x >= 30:
+            return "background-color: #d6ecff;"  # 연파랑
+        return ""
+
+    # NOTE: st.data_editor는 pandas.Styler 스타일을 '비편집(Disabled) 컬럼'에만 적용합니다.
+    _cols = list(df_view.columns)
+    _idx_name = _cols.index("상품명") + 1 if "상품명" in _cols else 1
+    _idx_have = _cols.index("보유수량") + 1 if "보유수량" in _cols else 1
+
+    st.markdown(
+        f"""
+        <style>
+/* data_editor 내 특정 열(상품명/보유수량) 글씨를 조금 더 굵게 */
+div[data-testid="stDataEditor"] div[role="row"] > div[role="gridcell"]:nth-child({_idx_name}),
+div[data-testid="stDataEditor"] div[role="row"] > div[role="gridcell"]:nth-child({_idx_have}),
+div[data-testid="stDataEditor"] div[role="columnheader"]:nth-child({_idx_name}),
+div[data-testid="stDataEditor"] div[role="columnheader"]:nth-child({_idx_have}),
+/* (구버전/브라우저 렌더 차이 대비) */
+div[data-testid="stDataEditor"] tbody tr td:nth-child({_idx_name}),
+div[data-testid="stDataEditor"] tbody tr td:nth-child({_idx_have}),
+div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_name}),
+div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
+    font-weight: 600;
+}}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    df_styler = df_view.style.applymap(_remain_bg, subset=["남은수량"]).set_properties(
+        subset=["보유수량"],
+        **{"font-weight": "600"},
+    )
 
     st.markdown("### 재고표 (수정/추가/삭제 가능)")
     edited = st.data_editor(
-        df_view,
+        df_styler,
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -839,7 +878,7 @@ def render_inventory_page():
         st.warning(f"⚠️ 상품명이 중복된 행이 있습니다: {', '.join(sorted(set(dup.astype(str))))}")
 
     # 저장/다운로드
-    colA, colB, colC = st.columns([1, 1, 2])
+    colA, colB, colC = st.columns([1, 1, 1])
     if colA.button("💾 저장", use_container_width=True):
         st.session_state["inventory_df"] = df_new
         save_inventory_df(df_new)
