@@ -796,10 +796,15 @@ def render_inventory_page():
     if "inventory_df" not in st.session_state:
         st.session_state["inventory_df"] = load_inventory_df()
 
-    df = st.session_state["inventory_df"].copy()
-    df = compute_inventory_df(df)
-    df_view = df
+    # 편집기(재고표)는 세션 상태를 우선 사용합니다.
+    # (data_editor의 Disabled 컬럼은 값이 자동으로 갱신되지 않을 수 있어, 세션 상태를 기준으로 스타일/표시를 맞춥니다.)
+    _editor_df = st.session_state.get("inventory_editor")
+    if isinstance(_editor_df, pd.DataFrame):
+        df_view = _editor_df.copy()
+    else:
+        df_view = st.session_state["inventory_df"].copy()
 
+    df_view = compute_inventory_df(df_view)
     # -------------------- table styling (남은수량 색상 + 굵은 글씨) --------------------
     def _remain_bg(v):
         try:
@@ -865,8 +870,36 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
         key="inventory_editor",
     )
 
-    # 편집 결과 반영
-    edited = compute_inventory_df(edited)
+        # 편집 결과 반영 (저장/새로고침 없이도 계산값이 바로 보이도록)
+    # data_editor의 Disabled 컬럼(보유수량/주문수량/남은수량)은 사용자가 수정할 수 없어서
+    # 화면에 표시되는 값이 '이전 값'으로 남는 경우가 있습니다.
+    # -> 편집된 값으로 재계산한 뒤, 계산 컬럼을 session_state에 되돌려 넣어 즉시 갱신합니다.
+    _disabled_cols = ["보유수량", "주문수량", "남은수량"]
+
+    edited_raw = edited.copy() if isinstance(edited, pd.DataFrame) else pd.DataFrame(edited)
+    edited_calc = compute_inventory_df(edited_raw)
+
+    def _series_equal(a: pd.Series, b: pd.Series) -> bool:
+        aa = pd.to_numeric(a, errors="coerce").fillna(0.0)
+        bb = pd.to_numeric(b, errors="coerce").fillna(0.0)
+        return aa.equals(bb)
+
+    _need_sync = False
+    for _c in _disabled_cols:
+        if _c in edited_raw.columns and _c in edited_calc.columns:
+            if not _series_equal(edited_raw[_c], edited_calc[_c]):
+                _need_sync = True
+                break
+
+    if _need_sync:
+        patched = edited_raw.copy()
+        for _c in _disabled_cols:
+            if _c in edited_calc.columns:
+                patched[_c] = edited_calc[_c].values
+        st.session_state["inventory_editor"] = patched
+        st.rerun()
+
+    edited = edited_calc
     edited = edited[edited["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
 
     df_new = compute_inventory_df(edited)
@@ -884,6 +917,7 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
         save_inventory_df(df_new)
         st.success("저장 완료!")
 
+        st.rerun()
     if colB.button("↻ 초기화(0으로)", use_container_width=True):
         base = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
         base = compute_inventory_df(base)
