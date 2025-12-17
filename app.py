@@ -7,22 +7,6 @@ from collections import defaultdict
 
 import pandas as pd
 import streamlit as st
-
-# -------------------- Optional: AgGrid (one-table edit + conditional color) --------------------
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
-    try:
-        # 컬럼을 화면에 맞춰 자동으로 줄여서(가로 드래그 최소화)
-        from st_aggrid.shared import ColumnsAutoSizeMode
-    except Exception:
-        ColumnsAutoSizeMode = None
-except Exception:
-    AgGrid = None
-    GridOptionsBuilder = None
-    GridUpdateMode = None
-    DataReturnMode = None
-    JsCode = None
-    ColumnsAutoSizeMode = None
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -643,9 +627,8 @@ INVENTORY_COLUMNS = [
 ]
 
 
-def _coerce_num_series(s: pd.Series) -> pd.Series:
-    """숫자/소수 허용 (빈값/문자 -> 0)"""
-    return pd.to_numeric(s, errors="coerce").fillna(0.0).astype(float)
+def _coerce_int_series(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
 
 
 def compute_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -659,11 +642,11 @@ def compute_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = 0
 
-    # 숫자 정리(소수 허용)
+    # 숫자 정리
     for col in ["재고", "입고", "1차", "2차", "3차"]:
-        df[col] = _coerce_num_series(df[col])
+        df[col] = _coerce_int_series(df[col])
 
-    # 공백 상품명 정리
+    # 공백 상품명 제거(단, 사용자가 편집중인 빈 행은 data_editor가 처리)
     df["상품명"] = df["상품명"].fillna("").astype(str).str.strip()
 
     df["보유수량"] = df["재고"] + df["입고"]
@@ -716,151 +699,35 @@ def save_inventory_df(df: pd.DataFrame) -> None:
     df.to_csv(INVENTORY_FILE, index=False, encoding="utf-8-sig")
 
 
-def parse_sum_to_number(total_str: str) -> float:
-    """제품별합계 '합계' 문자열에서 첫 번째 숫자만 뽑아 등록용 수치로 사용"""
-    s = (total_str or "").strip()
-    nums = re.findall(r"[-+]?\d*\.?\d+", s)
-    if not nums:
-        return 0.0
-    try:
-        return float(nums[0])
-    except Exception:
-        return 0.0
-
-
-def register_sum_to_inventory(sum_df_long: pd.DataFrame, target_col: str, add_mode: bool = False):
-    """제품별합계(df_long)를 재고관리의 1차/2차/3차 중 하나로 등록(상품명이 있는 것만)"""
-    if sum_df_long is None or len(sum_df_long) == 0:
-        return 0, []
-
-    # 현재 세션에 재고표가 있으면 우선 사용, 없으면 파일에서 로드
-    if "inventory_df" in st.session_state:
-        inv = st.session_state["inventory_df"].copy()
-    else:
-        inv = load_inventory_df()
-
-    inv = compute_inventory_df(inv)
-
-    inv_names = inv["상품명"].fillna("").astype(str).str.strip()
-    name_to_idx = {n: i for i, n in enumerate(inv_names)}
-
-    skipped = []
-    updated = 0
-
-    for _, r in sum_df_long.iterrows():
-        name = str(r.get("제품명", "")).strip()
-        if not name:
-            continue
-        if name not in name_to_idx:
-            skipped.append(name)
-            continue
-
-        qty = parse_sum_to_number(str(r.get("합계", "0")))
-        i = name_to_idx[name]
-
-        if add_mode:
-            inv.at[i, target_col] = float(inv.at[i, target_col]) + float(qty)
-        else:
-            inv.at[i, target_col] = float(qty)
-
-        updated += 1
-
-    inv = compute_inventory_df(inv)
-    inv = sort_inventory_df(inv).reset_index(drop=True)
-
-    st.session_state["inventory_df"] = inv
-    save_inventory_df(inv)
-
-    return updated, skipped
-
-
 def inventory_df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
-    """재고표를 XLSX 바이트로 변환.
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="재고표")
+        ws = writer.sheets["재고표"]
+        ws.freeze_panes = "B2"
+        # 간단한 열 너비
+        widths = {
+            "A": 16, "B": 8, "C": 8, "D": 10,
+            "E": 8, "F": 8, "G": 8, "H": 10, "I": 10
+        }
+        for col, w in widths.items():
+            ws.column_dimensions[col].width = w
+    return buf.getvalue()
 
-    Streamlit Cloud에서 openpyxl 미설치로 ModuleNotFoundError가 나는 경우가 있어,
-    엔진을 순차 시도(openpyxl -> xlsxwriter)하도록 처리.
-    둘 다 없으면 ModuleNotFoundError를 그대로 올린다.
-    """
 
-    last_err: Exception | None = None
-    for engine in ("openpyxl", "xlsxwriter"):
-        buf = io.BytesIO()
+def style_inventory_preview(df: pd.DataFrame):
+    # 남은수량 색상(음수=빨강, 0=연핑크, 양수=연하늘)
+    def _cell_style(val):
         try:
-            with pd.ExcelWriter(buf, engine=engine) as writer:
-                df.to_excel(writer, index=False, sheet_name="재고표")
-                # openpyxl일 때만 시트 조작(없으면 건너뜀)
-                ws = getattr(writer, "sheets", {}).get("재고표")
-                if ws is not None:
-                    try:
-                        ws.freeze_panes = "B2"
-                        widths = {
-                            "A": 16, "B": 8, "C": 8, "D": 10,
-                            "E": 8, "F": 8, "G": 8, "H": 10, "I": 10
-                        }
-                        for col, w in widths.items():
-                            ws.column_dimensions[col].width = w
-                    except Exception:
-                        # 엔진/버전 차이로 실패해도 파일 생성은 유지
-                        pass
-            return buf.getvalue()
-        except ModuleNotFoundError as e:
-            last_err = e
-            continue
-        except Exception as e:
-            # 다른 예외는 그대로 전달
-            raise
-
-    # 둘 다 미설치
-    if isinstance(last_err, ModuleNotFoundError):
-        raise last_err
-    raise ModuleNotFoundError("엑셀 저장용 엔진(openpyxl/xlsxwriter)을 찾을 수 없습니다.")
-
-
-def style_inventory_table(df: pd.DataFrame):
-    """재고표(보기 탭) 가독성 스타일.
-
-    - 상품명/남은수량: 크게 + 두껍게
-    - 보유수량: 두껍게
-    - 남은수량 조건부 색상
-        * 0 미만: 빨강
-        * 0 이상 10 이하: 노랑
-        * 10 초과 30 미만: 색 없음
-        * 30 이상: 파랑
-    """
-    df = df.copy()
-
-    def _remain_style(val):
-        try:
-            v = float(val)
+            v = int(val)
         except Exception:
             return ""
         if v < 0:
-            return "background-color: #ffcccc; font-weight: 900;"  # < 0 : 빨강
-        if 0 <= v <= 10:
-            return "background-color: #ffe4ea; font-weight: 900;"  # 0~10 : 연분홍
-        if v >= 30:
-            return "background-color: #d7ecff; font-weight: 900;"  # >=30 : 연파랑
-        return ""
-
-    num_cols = [c for c in INVENTORY_COLUMNS if c != "상품명"]
-
-    sty = df.style.applymap(_remain_style, subset=["남은수량"])
-    # 숫자 표시는 보기 좋게(뒤 0 제거)
-    fmt_g = lambda x: ("%g" % x) if isinstance(x, (int, float)) else x
-    sty = sty.format({c: fmt_g for c in num_cols})
-
-    # 가독성: 핵심 컬럼 강조
-    sty = sty.set_properties(subset=["상품명"], **{"font-weight": "900", "font-size": "18px", "text-align": "left"})
-    sty = sty.set_properties(subset=["남은수량"], **{"font-size": "18px"})
-    sty = sty.set_properties(subset=["보유수량"], **{"font-weight": "900"})
-    sty = sty.set_properties(subset=num_cols, **{"text-align": "right"})
-
-    # 헤더/패딩
-    sty = sty.set_table_styles([
-        {"selector": "th", "props": [("font-weight", "800"), ("text-align", "center"), ("background-color", "#f3f4f6")]},
-        {"selector": "td", "props": [("padding", "6px 10px")]},
-    ])
-    return sty
+            return "background-color: #ffb3b3; font-weight: 700;"
+        if v == 0:
+            return "background-color: #ffe4e4;"
+        return "background-color: #d9f3ff;"
+    return df.style.applymap(_cell_style, subset=["남은수량"])
 
 
 def render_inventory_page():
@@ -870,267 +737,92 @@ def render_inventory_page():
     if "inventory_df" not in st.session_state:
         st.session_state["inventory_df"] = load_inventory_df()
 
-    # ---- 현재 데이터(계산/정렬) ----
-    base_raw = st.session_state["inventory_df"].copy()
-    base_raw = base_raw[base_raw.get("상품명", "").astype(str).str.strip() != ""].copy() if "상품명" in base_raw.columns else base_raw
+    df = st.session_state["inventory_df"].copy()
 
-    base_calc = compute_inventory_df(base_raw).copy()
-    base_calc = sort_inventory_df(base_calc).reset_index(drop=True)
+    # 검색(필터)
+    q = st.text_input("🔎 상품명 검색", value="", placeholder="예: 잎로메인")
+    if q.strip():
+        df_view = df[df["상품명"].astype(str).str.contains(q.strip(), case=False, na=False)].copy()
+    else:
+        df_view = df
 
-    # 표시 컬럼(열 위치 유지)
-    show_cols = ["상품명", "재고", "입고", "보유수량", "1차", "2차", "3차", "주문수량", "남은수량"]
-    for c in show_cols:
-        if c not in base_calc.columns:
-            base_calc[c] = 0
+    # 요약
+    c1, c2, c3 = st.columns(3)
+    c1.metric("총 보유수량", int(df_view["보유수량"].sum()))
+    c2.metric("총 주문수량", int(df_view["주문수량"].sum()))
+    c3.metric("총 남은수량", int(df_view["남은수량"].sum()))
 
-    df_show = base_calc[show_cols].copy()
-    df_show["_row"] = list(range(len(df_show)))
-    df_show["_delete"] = False
+    st.markdown("### 재고표 (수정/추가/삭제 가능)")
+    edited = st.data_editor(
+        df_view,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        disabled=["보유수량", "주문수량", "남은수량"],
+        column_config={
+            "상품명": st.column_config.TextColumn("상품명", required=True),
+            "재고": st.column_config.NumberColumn("재고", min_value=0, step=1, format="%d"),
+            "입고": st.column_config.NumberColumn("입고", min_value=0, step=1, format="%d"),
+            "보유수량": st.column_config.NumberColumn("보유수량", format="%d"),
+            "1차": st.column_config.NumberColumn("1차", min_value=0, step=1, format="%d"),
+            "2차": st.column_config.NumberColumn("2차", min_value=0, step=1, format="%d"),
+            "3차": st.column_config.NumberColumn("3차", min_value=0, step=1, format="%d"),
+            "주문수량": st.column_config.NumberColumn("주문수량", format="%d"),
+            "남은수량": st.column_config.NumberColumn("남은수량", format="%d"),
+        },
+        key="inventory_editor",
+    )
 
-    # 새 행 추가용(표 안에서 추가)
-    blank = {c: 0 for c in show_cols}
-    blank["상품명"] = ""
-    blank["_row"] = len(df_show)
-    blank["_delete"] = False
-    df_show = pd.concat([df_show, pd.DataFrame([blank])], ignore_index=True)
+    # 편집 결과를 원본 df에 반영(검색 필터 중일 때도 안전하게)
+    #  - edited 는 df_view 기반이므로, 상품명 기준으로 merge/update
+    edited = compute_inventory_df(edited)
+    edited = edited[edited["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
 
-    # 안내
-    st.caption("✅ 표에서 바로 수정/추가 가능 · 행 선택 후 Delete(또는 Backspace)로 삭제 · 우클릭 메뉴가 뜨면 '삭제'로도 가능")
+    if q.strip():
+        # df에서 해당 상품명들만 교체 + 새로 추가된 상품은 append
+        names_view = set(df_view["상품명"].astype(str))
+        df_rest = df[~df["상품명"].astype(str).isin(names_view)].copy()
+        df_new = pd.concat([df_rest, edited], ignore_index=True)
+    else:
+        df_new = edited
 
-    # 가로 폭만 줄이기: 화면을 2등분하고 왼쪽에 표를 배치
-    _sp1, col_left, _sp2 = st.columns([1, 2, 1], gap="large")
+    df_new = compute_inventory_df(df_new)
+    df_new = sort_inventory_df(df_new).reset_index(drop=True)
 
-    # 세로 크기는 유지: 행 수에 맞춰 충분히 크게(최대 1000px)
-    grid_height = int(min(1000, 120 + (len(df_show) + 1) * 34))
+    # 중복 상품명 경고(원하면 나중에 '자동 합치기' 옵션 추가 가능)
+    dup = df_new["상품명"][df_new["상품명"].duplicated(keep=False)]
+    if len(dup) > 0:
+        st.warning(f"⚠️ 상품명이 중복된 행이 있습니다: {', '.join(sorted(set(dup.astype(str))))}")
 
+    # 저장/다운로드
+    colA, colB, colC = st.columns([1, 1, 2])
+    if colA.button("💾 저장", use_container_width=True):
+        st.session_state["inventory_df"] = df_new
+        save_inventory_df(df_new)
+        st.success("저장 완료!")
 
-    # ---- AgGrid 사용 가능하면: 한 표에서 편집+가독성+단축키 삭제 ----
-    with col_left:
-        if AgGrid is not None and GridOptionsBuilder is not None and JsCode is not None:
-            fixed_list = FIXED_PRODUCT_ORDER[:]  # JS에 주입
+    if colB.button("↻ 초기화(0으로)", use_container_width=True):
+        base = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
+        base = compute_inventory_df(base)
+        base = sort_inventory_df(base).reset_index(drop=True)
+        st.session_state["inventory_df"] = base
+        save_inventory_df(base)
+        st.success("초기화 완료!")
+        st.rerun()
 
-            js_name_style = JsCode("""
-            function(params){
-                return {"fontWeight":"800","fontSize":"15px"};
-            }
-            """)
+    xlsx_bytes = inventory_df_to_xlsx_bytes(df_new)
+    colC.download_button(
+        "⬇️ 엑셀 다운로드(.xlsx)",
+        data=xlsx_bytes,
+        file_name=f"재고표_{now_prefix_kst()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
-            js_boyu_style = JsCode("""
-            function(params){
-                return {"fontWeight":"800"};
-            }
-            """)
-
-            # 남은수량 색 규칙
-            js_remain_style = JsCode("""
-            function(params){
-                var v = Number(params.value);
-                if (isNaN(v)) { return {}; }
-                if (v < 0) {
-                    return {"backgroundColor":"#ff3b30","color":"#000000","fontWeight":"900","fontSize":"15px"};
-                }
-                if (v >= 0 && v <= 10) {
-                    return {"backgroundColor":"#ffd6e7","fontWeight":"900","fontSize":"15px"};
-                }
-                if (v >= 30) {
-                    return {"backgroundColor":"#d6f5ff","fontWeight":"900","fontSize":"15px"};
-                }
-                return {"fontWeight":"900","fontSize":"15px"};
-            }
-            """)
-
-            # Delete/Backspace로 선택 행 삭제 플래그(_delete) 세팅 (고정 상품은 삭제 방지)
-            js_on_keydown = JsCode(f"""
-            function(e) {{
-                if (!e || !e.event) return;
-                var k = e.event.key;
-                if (k !== 'Delete' && k !== 'Backspace') return;
-
-                var fixed = {fixed_list};
-                var nodes = e.api.getSelectedNodes();
-                if (!nodes || nodes.length === 0) return;
-
-                nodes.forEach(function(n) {{
-                    try {{
-                        var nm = (n.data && n.data['상품명']) ? String(n.data['상품명']).trim() : '';
-                        if (nm && fixed.indexOf(nm) >= 0) {{
-                            // 고정 상품은 삭제하지 않음(숫자를 0으로 바꿔서 관리)
-                            return;
-                        }}
-                        n.setDataValue('_delete', true);
-                    }} catch(err) {{}}
-                }});
-            }}
-            """)
-
-            # 우클릭 컨텍스트 메뉴(가능한 환경에서만 동작)
-            js_context_menu = JsCode(f"""
-            function(params) {{
-                var fixed = {fixed_list};
-                var items = ['copy', 'copyWithHeaders', 'paste'];
-                items.push('separator');
-                items.push({{
-                    name: '선택 행 삭제 (Del)',
-                    action: function() {{
-                        var nodes = params.api.getSelectedNodes();
-                        nodes.forEach(function(n) {{
-                            try {{
-                                var nm = (n.data && n.data['상품명']) ? String(n.data['상품명']).trim() : '';
-                                if (nm && fixed.indexOf(nm) >= 0) return;
-                                n.setDataValue('_delete', true);
-                            }} catch(err) {{}}
-                        }});
-                    }}
-                }});
-                return items;
-            }}
-            """)
-
-            # Grid Options
-            gb = GridOptionsBuilder.from_dataframe(df_show)
-
-            # 기본 설정
-            gb.configure_default_column(
-                editable=True,
-                resizable=True,
-                sortable=False,
-                filter=False,
-                wrapText=False,
-            )
-
-            # 컬럼별(열 위치 유지)
-            gb.configure_column("상품명", header_name="상품명", editable=True, width=130, cellStyle=js_name_style)
-            for c in ["재고", "입고", "1차", "2차", "3차"]:
-                gb.configure_column(c, editable=True, width=45, type=["numericColumn"])
-            gb.configure_column("보유수량", editable=False, width=55, type=["numericColumn"], cellStyle=js_boyu_style)
-            gb.configure_column("주문수량", editable=False, width=55, type=["numericColumn"])
-            gb.configure_column("남은수량", editable=False, width=65, type=["numericColumn"], cellStyle=js_remain_style)
-
-            # 내부 컬럼 숨김
-            gb.configure_column("_row", hide=True)
-            gb.configure_column("_delete", hide=True, editable=True)
-
-            # 그리드 옵션
-            gb.configure_grid_options(
-                rowSelection="multiple",
-                rowMultiSelectWithClick=True,
-                suppressRowClickSelection=False,
-                undoRedoCellEditing=True,
-                undoRedoCellEditingLimit=20,
-                onCellKeyDown=js_on_keydown,
-                getContextMenuItems=js_context_menu,
-                headerHeight=34,
-                rowHeight=34,
-            )
-
-            # 줄바꿈/가독성용 CSS(전체 크기 컴팩트)
-            custom_css = {
-                ".ag-theme-streamlit": {"font-size": "13px"},
-                ".ag-header-cell-label": {"font-weight": "800"},
-                ".ag-cell": {"padding": "4px 8px"},
-            }
-
-            grid_options = gb.build()
-
-            grid = AgGrid(
-                df_show,
-                gridOptions=grid_options,
-                update_mode=GridUpdateMode.MODEL_CHANGED,
-                data_return_mode=DataReturnMode.AS_INPUT,
-                theme="streamlit",
-                fit_columns_on_grid_load=True,
-                allow_unsafe_jscode=True,
-                enable_enterprise_modules=True,  # 컨텍스트 메뉴(환경에 따라)
-                height=grid_height,  # 세로는 유지(자동 계산)
-                custom_css=custom_css,
-            )
-
-            # ---- 결과 반영 ----
-            try:
-                df_new = pd.DataFrame(grid.get("data", df_show))
-            except Exception:
-                df_new = df_show.copy()
-
-            # 삭제 플래그 반영
-            if "_delete" in df_new.columns:
-                del_mask = df_new["_delete"].fillna(False).astype(bool)
-                if del_mask.any():
-                    df_new = df_new.loc[~del_mask].copy()
-                    try:
-                        st.toast(f"🗑 {int(del_mask.sum())}행 삭제됨", icon="🗑")
-                    except Exception:
-                        st.info(f"🗑 {int(del_mask.sum())}행 삭제됨")
-
-            # 저장용 베이스 컬럼만 추출
-            base_cols = ["상품명", "재고", "입고", "1차", "2차", "3차"]
-            for c in base_cols:
-                if c not in df_new.columns:
-                    df_new[c] = 0
-
-            df_base = df_new[base_cols].copy()
-            df_base["상품명"] = df_base["상품명"].astype(str).str.strip()
-            df_base = df_base[df_base["상품명"] != ""].copy()
-
-            # 숫자 정리(소수 허용)
-            for c in ["재고", "입고", "1차", "2차", "3차"]:
-                df_base[c] = _coerce_num_series(df_base[c])
-
-            # 고정 상품은 항상 존재(삭제 방지용)
-            existing = set(df_base["상품명"].tolist())
-            missing = [p for p in FIXED_PRODUCT_ORDER if p not in existing]
-            if missing:
-                df_base = pd.concat(
-                    [df_base, pd.DataFrame({"상품명": missing, "재고": 0, "입고": 0, "1차": 0, "2차": 0, "3차": 0})],
-                    ignore_index=True,
-                )
-
-            # 중복 상품명 정리(첫 행 우선)
-            df_base = df_base.drop_duplicates(subset=["상품명"], keep="first").reset_index(drop=True)
-
-            # 세션 반영
-            st.session_state["inventory_df"] = df_base
-
-            # ---- 하단 버튼 ----
-            b1, b2, b3 = st.columns([1, 1, 2])
-            with b1:
-                if st.button("💾 저장", use_container_width=True):
-                    df_to_save = compute_inventory_df(st.session_state["inventory_df"])
-                    df_to_save = sort_inventory_df(df_to_save).reset_index(drop=True)
-                    save_inventory_df(df_to_save)
-                    st.success("저장 완료")
-
-            with b2:
-                if st.button("🔄 초기화(0)", use_container_width=True):
-                    df0 = st.session_state["inventory_df"].copy()
-                    for c in ["재고", "입고", "1차", "2차", "3차"]:
-                        df0[c] = 0
-                    st.session_state["inventory_df"] = df0
-                    st.rerun()
-
-            with b3:
-                # 다운로드(엔진 없으면 CSV로 대체)
-                df_dl = compute_inventory_df(st.session_state["inventory_df"])
-                df_dl = sort_inventory_df(df_dl).reset_index(drop=True)
-                now = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-                # CSV는 항상 제공
-                csv_bytes = df_dl.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "⬇️ CSV 다운로드",
-                    data=csv_bytes,
-                    file_name=f"재고표_{now}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-        else:
-            # fallback: 기본 data_editor (색/단축키 삭제는 제한)
-            st.info("현재 환경에서는 고급 표(단축키 삭제/색상)를 사용할 수 없어 기본 편집 표로 표시합니다. requirements.txt에 streamlit-aggrid를 추가하면 개선됩니다.")
-            df_base = st.session_state["inventory_df"].copy()
-            df_calc = sort_inventory_df(compute_inventory_df(df_base)).reset_index(drop=True)
-            st.data_editor(df_calc, use_container_width=True, num_rows="dynamic")
+    st.markdown("### 미리보기(색상/디자인)")
+    st.dataframe(style_inventory_preview(df_new), use_container_width=True, hide_index=True)
 
 def render_pdf_page():
-
     st.title("제품별 수량 합산(PDF 업로드)")
 
     if "rules_text" not in st.session_state:
@@ -1259,7 +951,6 @@ def render_pdf_page():
             })
 
         df_long = pd.DataFrame(rows)
-        st.session_state["last_sum_df_long"] = df_long.copy()
 
         # ✅ 화면은 "위→아래" 순서로 보이도록 세로우선 배치
         df_wide = to_3_per_row(df_long, 3)
@@ -1267,7 +958,7 @@ def render_pdf_page():
         st.subheader("🧾 제품별 합계")
         st.dataframe(df_wide, use_container_width=True, hide_index=True)
 
-        # ✅ 버튼 3개를 "옆에" 배치: PDF / 스크린샷(PNG 1장) / 재고등록
+        # ✅ 버튼 2개를 "옆에" 배치: PDF / 스크린샷(PNG 1장)
         try:
             pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
 
@@ -1275,7 +966,7 @@ def render_pdf_page():
             sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
             sum_png_one = merge_png_pages_to_one(sum_imgs)
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
             with c1:
                 st.download_button(
                     "📄 PDF 다운로드(제품별합계)",
@@ -1292,30 +983,6 @@ def render_pdf_page():
                     mime="image/png",
                     use_container_width=True,
                 )
-            with c3:
-                if st.button("📝 재고등록", use_container_width=True):
-                    st.session_state["show_register_panel"] = True
-
-            if st.session_state.get("show_register_panel"):
-                st.markdown("#### 📝 재고등록 (1차/2차/3차)")
-                target = st.radio("등록할 차수", ["1차", "2차", "3차"], horizontal=True, key="register_target")
-                add_mode = st.checkbox("기존 값에 누적(더하기)", value=False, key="register_add_mode")
-
-                colR1, colR2 = st.columns([1, 3])
-                with colR1:
-                    do_reg = st.button("✅ 등록", use_container_width=True, key="do_register_btn")
-                with colR2:
-                    st.caption("※ 재고관리 표에 **이미 존재하는 상품명만** 등록됩니다. (없는 상품은 제외)")
-
-                if do_reg:
-                    sum_df = st.session_state.get("last_sum_df_long")
-                    updated, skipped = register_sum_to_inventory(sum_df, target_col=target, add_mode=add_mode)
-                    st.session_state["show_register_panel"] = False
-
-                    if skipped:
-                        st.warning("등록 제외(재고관리 상품명 없음): " + ", ".join(sorted(set(skipped))))
-                    st.success(f"{target}에 등록 완료! (반영 행: {updated})")
-                    st.info("📦 사이드바의 '재고관리'로 이동하면 확인할 수 있어요.")
 
             # PIL 없으면 여러 페이지 합치기 불가 안내
             if Image is None and len(sum_imgs) > 1:
