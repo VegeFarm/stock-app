@@ -2,6 +2,8 @@ import io
 import os
 import re
 import math
+from decimal import Decimal
+
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
@@ -650,9 +652,36 @@ def compute_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
     # 공백 상품명 정리
     df["상품명"] = df["상품명"].fillna("").astype(str).str.strip()
 
-    df["보유수량"] = df["재고"] + df["입고"]
-    df["주문수량"] = df["1차"] + df["2차"] + df["3차"]
-    df["남은수량"] = df["보유수량"] - df["주문수량"]
+    # Decimal 기반 계산으로 부동소수점 표시(예: 1.2000000000000002) 방지
+    def _to_decimal(v):
+        if v is None:
+            return Decimal("0")
+        try:
+            # NaN 처리
+            if isinstance(v, float) and math.isnan(v):
+                return Decimal("0")
+            return Decimal(str(v))
+        except Exception:
+            return Decimal("0")
+
+    stock_dec = [_to_decimal(v) for v in df["재고"].tolist()]
+    in_dec = [_to_decimal(v) for v in df["입고"].tolist()]
+    one_dec = [_to_decimal(v) for v in df["1차"].tolist()]
+    two_dec = [_to_decimal(v) for v in df["2차"].tolist()]
+    three_dec = [_to_decimal(v) for v in df["3차"].tolist()]
+
+    have_dec = [a + b for a, b in zip(stock_dec, in_dec)]
+    order_dec = [a + b + c for a, b, c in zip(one_dec, two_dec, three_dec)]
+    remain_dec = [a - b for a, b in zip(have_dec, order_dec)]
+
+    df["보유수량"] = [float(x) for x in have_dec]
+    df["주문수량"] = [float(x) for x in order_dec]
+    df["남은수량"] = [float(x) for x in remain_dec]
+
+    # -0.0 같은 값도 0으로 정리
+    for c in ["보유수량", "주문수량", "남은수량"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        df[c] = df[c].mask(df[c].abs() < 1e-12, 0.0)
 
     return df[INVENTORY_COLUMNS]
 
@@ -814,7 +843,7 @@ def render_inventory_page():
         except Exception:
             return ""
         if x < 0:
-            return "background-color: #ffb3b3;"  # 연한 빨강
+            return "background-color: #ffcccc;"  # 더 연한 빨강
         if 0 <= x <= 10:
             return "background-color: #ffd6e7;"  # 연분홍
         if x >= 30:
