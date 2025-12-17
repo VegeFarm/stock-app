@@ -797,19 +797,13 @@ def render_inventory_page():
         st.session_state["inventory_df"] = load_inventory_df()
 
     df = st.session_state["inventory_df"].copy()
-
-    # 검색(필터)
-    q = st.text_input("🔎 상품명 검색", value="", placeholder="예: 잎로메인")
-    if q.strip():
-        df_view = df[df["상품명"].astype(str).str.contains(q.strip(), case=False, na=False)].copy()
-    else:
-        df_view = df
+    df = compute_inventory_df(df)
+    df_view = df
 
     # 요약
-    c1, c2, c3 = st.columns(3)
-    c1.metric("총 보유수량", fmt_num(float(df_view["보유수량"].sum()), 2))
-    c2.metric("총 주문수량", fmt_num(float(df_view["주문수량"].sum()), 2))
-    c3.metric("총 남은수량", fmt_num(float(df_view["남은수량"].sum()), 2))
+    c1, c2 = st.columns(2)
+    c1.metric("총 주문수량", fmt_num(float(df_view["주문수량"].sum()), 2))
+    c2.metric("총 남은수량", fmt_num(float(df_view["남은수량"].sum()), 2))
 
     st.markdown("### 재고표 (수정/추가/삭제 가능)")
     edited = st.data_editor(
@@ -832,20 +826,11 @@ def render_inventory_page():
         key="inventory_editor",
     )
 
-    # 편집 결과를 원본 df에 반영(검색 필터 중일 때도 안전하게)
-    #  - edited 는 df_view 기반이므로, 상품명 기준으로 merge/update
+    # 편집 결과 반영
     edited = compute_inventory_df(edited)
     edited = edited[edited["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
 
-    if q.strip():
-        # df에서 해당 상품명들만 교체 + 새로 추가된 상품은 append
-        names_view = set(df_view["상품명"].astype(str))
-        df_rest = df[~df["상품명"].astype(str).isin(names_view)].copy()
-        df_new = pd.concat([df_rest, edited], ignore_index=True)
-    else:
-        df_new = edited
-
-    df_new = compute_inventory_df(df_new)
+    df_new = compute_inventory_df(edited)
     df_new = sort_inventory_df(df_new).reset_index(drop=True)
 
     # 중복 상품명 경고(원하면 나중에 '자동 합치기' 옵션 추가 가능)
@@ -878,8 +863,6 @@ def render_inventory_page():
         use_container_width=True,
     )
 
-    st.markdown("### 미리보기(색상/디자인)")
-    st.dataframe(style_inventory_preview(df_new), use_container_width=True, hide_index=True)
 
 def render_pdf_page():
     st.title("제품별 수량 합산(PDF 업로드)")
