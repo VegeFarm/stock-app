@@ -792,6 +792,10 @@ def style_inventory_preview(df: pd.DataFrame):
 def render_inventory_page():
     st.title("재고관리")
 
+    msg = st.session_state.pop("inventory_toast", None)
+    if msg:
+        st.success(msg)
+
     # 최초 로드
     if "inventory_df" not in st.session_state:
         st.session_state["inventory_df"] = load_inventory_df()
@@ -874,12 +878,9 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
 
     edited_raw = edited_raw.copy() if isinstance(edited_raw, pd.DataFrame) else pd.DataFrame(edited_raw)
 
-    # 입력/수정 즉시 계산(보유수량/주문수량/남은수량) 반영
-    df_new = compute_inventory_df(edited_raw)
-    df_new = sort_inventory_df(df_new).reset_index(drop=True)
-    df_new = df_new[df_new["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+    # NOTE: 보유수량/주문수량/남은수량 계산은 '저장'을 눌렀을 때만 반영합니다.
 
-    # ---------- 변경 감지(편집 컬럼만 비교) ----------
+    # ---------- 편집값 정규화(계산 전) ----------
     def _base_view(df: pd.DataFrame) -> pd.DataFrame:
         base_cols = ["상품명", "재고", "입고", "1차", "2차", "3차"]
         dd = df.copy()
@@ -891,18 +892,12 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
             dd[c] = pd.to_numeric(dd[c], errors="coerce").fillna(0.0)
         return dd[base_cols].reset_index(drop=True)
 
-    need_refresh_editor = False
-    current_base = _base_view(df_view)
-    new_base = _base_view(df_new)
 
-    if not current_base.equals(new_base):
-        # 세션 상태의 재고표를 최신 편집값으로 갱신(화면 계산은 즉시)
-        st.session_state["inventory_df"] = df_new
-        st.session_state["inventory_editor_version"] = ver + 1
-        need_refresh_editor = True
+    df_base_new = _base_view(edited_raw)
+    df_base_new = df_base_new[df_base_new["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
 
     # 중복 상품명 경고(원하면 나중에 '자동 합치기' 옵션 추가 가능)
-    dup = df_new["상품명"][df_new["상품명"].duplicated(keep=False)]
+    dup = df_base_new["상품명"][df_base_new["상품명"].duplicated(keep=False)]
     if len(dup) > 0:
         st.warning(f"⚠️ 상품명이 중복된 행이 있습니다: {', '.join(sorted(set(dup.astype(str))))}")
 
@@ -910,22 +905,31 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
     colA, colB, colC = st.columns([1, 1, 1])
 
     if colA.button("💾 저장", use_container_width=True):
-        st.session_state["inventory_df"] = df_new
-        save_inventory_df(df_new)
-        st.success("저장 완료!")
-        # 저장 후에는 그대로 새로고침
+        df_save = compute_inventory_df(df_base_new)
+        df_save = sort_inventory_df(df_save).reset_index(drop=True)
+        df_save = df_save[df_save["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+
+        st.session_state["inventory_df"] = df_save
+        save_inventory_df(df_save)
+
+        # 저장 후 계산값(Disabled 컬럼)이 즉시 보이도록 에디터 키를 변경
+        st.session_state["inventory_editor_version"] = ver + 1
+        st.session_state["inventory_toast"] = "저장 완료!"
         st.rerun()
 
     if colB.button("↻ 초기화(0으로)", use_container_width=True):
         base = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
         base = compute_inventory_df(base)
         base = sort_inventory_df(base).reset_index(drop=True)
+
         st.session_state["inventory_df"] = base
         save_inventory_df(base)
-        st.success("초기화 완료!")
+
+        st.session_state["inventory_editor_version"] = ver + 1
+        st.session_state["inventory_toast"] = "초기화 완료!"
         st.rerun()
 
-    xlsx_bytes = inventory_df_to_xlsx_bytes(df_new)
+    xlsx_bytes = inventory_df_to_xlsx_bytes(df_view)
     colC.download_button(
         "⬇️ 엑셀 다운로드(.xlsx)",
         data=xlsx_bytes,
@@ -934,9 +938,6 @@ div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}) {{
         use_container_width=True,
     )
 
-    # 마지막에 에디터를 한 번 더 리렌더링해서(버전키 변경) 계산값이 즉시 표시되게 함
-    if need_refresh_editor:
-        st.rerun()
 
 
 def render_pdf_page():
