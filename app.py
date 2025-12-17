@@ -782,7 +782,7 @@ def style_inventory_preview(df: pd.DataFrame):
         except Exception:
             return ""
         if v < 0:
-            return "background-color: #ffb3b3; font-weight: 700;"
+            return "background-color: #ffb3b3; font-weight: 800;"
         if abs(v) < 1e-12:
             return "background-color: #ffe4e4;"
         return "background-color: #d9f3ff;"
@@ -814,7 +814,7 @@ def render_inventory_page():
         except Exception:
             return ""
         if x < 0:
-            return "background-color: #ff3b3b;"  # 빨강
+            return "background-color: #ffb3b3;"  # 연한 빨강
         if 0 <= x <= 10:
             return "background-color: #ffd6e7;"  # 연분홍
         if x >= 30:
@@ -845,7 +845,7 @@ div[data-testid="stDataEditor"] tbody tr td:nth-child({_idx_remain}),
 div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_name}),
 div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_have}),
 div[data-testid="stDataEditor"] thead tr th:nth-child({_idx_remain}) {{
-    font-weight: 700;
+    font-weight: 800 !important;
 }}
 </style>
         """,
