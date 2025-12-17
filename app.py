@@ -627,8 +627,9 @@ INVENTORY_COLUMNS = [
 ]
 
 
-def _coerce_int_series(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
+def _coerce_num_series(s: pd.Series) -> pd.Series:
+    """숫자/소수 허용 (빈값/문자 -> 0)"""
+    return pd.to_numeric(s, errors="coerce").fillna(0.0).astype(float)
 
 
 def compute_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -642,11 +643,11 @@ def compute_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = 0
 
-    # 숫자 정리
+    # 숫자 정리(소수 허용)
     for col in ["재고", "입고", "1차", "2차", "3차"]:
-        df[col] = _coerce_int_series(df[col])
+        df[col] = _coerce_num_series(df[col])
 
-    # 공백 상품명 제거(단, 사용자가 편집중인 빈 행은 data_editor가 처리)
+    # 공백 상품명 정리
     df["상품명"] = df["상품명"].fillna("").astype(str).str.strip()
 
     df["보유수량"] = df["재고"] + df["입고"]
@@ -699,6 +700,64 @@ def save_inventory_df(df: pd.DataFrame) -> None:
     df.to_csv(INVENTORY_FILE, index=False, encoding="utf-8-sig")
 
 
+def parse_sum_to_number(total_str: str) -> float:
+    """제품별합계 '합계' 문자열에서 첫 번째 숫자만 뽑아 등록용 수치로 사용"""
+    s = (total_str or "").strip()
+    nums = re.findall(r"[-+]?\d*\.?\d+", s)
+    if not nums:
+        return 0.0
+    try:
+        return float(nums[0])
+    except Exception:
+        return 0.0
+
+
+def register_sum_to_inventory(sum_df_long: pd.DataFrame, target_col: str, add_mode: bool = False):
+    """제품별합계(df_long)를 재고관리의 1차/2차/3차 중 하나로 등록(상품명이 있는 것만)"""
+    if sum_df_long is None or len(sum_df_long) == 0:
+        return 0, []
+
+    # 현재 세션에 재고표가 있으면 우선 사용, 없으면 파일에서 로드
+    if "inventory_df" in st.session_state:
+        inv = st.session_state["inventory_df"].copy()
+    else:
+        inv = load_inventory_df()
+
+    inv = compute_inventory_df(inv)
+
+    inv_names = inv["상품명"].fillna("").astype(str).str.strip()
+    name_to_idx = {n: i for i, n in enumerate(inv_names)}
+
+    skipped = []
+    updated = 0
+
+    for _, r in sum_df_long.iterrows():
+        name = str(r.get("제품명", "")).strip()
+        if not name:
+            continue
+        if name not in name_to_idx:
+            skipped.append(name)
+            continue
+
+        qty = parse_sum_to_number(str(r.get("합계", "0")))
+        i = name_to_idx[name]
+
+        if add_mode:
+            inv.at[i, target_col] = float(inv.at[i, target_col]) + float(qty)
+        else:
+            inv.at[i, target_col] = float(qty)
+
+        updated += 1
+
+    inv = compute_inventory_df(inv)
+    inv = sort_inventory_df(inv).reset_index(drop=True)
+
+    st.session_state["inventory_df"] = inv
+    save_inventory_df(inv)
+
+    return updated, skipped
+
+
 def inventory_df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -719,12 +778,12 @@ def style_inventory_preview(df: pd.DataFrame):
     # 남은수량 색상(음수=빨강, 0=연핑크, 양수=연하늘)
     def _cell_style(val):
         try:
-            v = int(val)
+            v = float(val)
         except Exception:
             return ""
         if v < 0:
             return "background-color: #ffb3b3; font-weight: 700;"
-        if v == 0:
+        if abs(v) < 1e-12:
             return "background-color: #ffe4e4;"
         return "background-color: #d9f3ff;"
     return df.style.applymap(_cell_style, subset=["남은수량"])
@@ -748,9 +807,9 @@ def render_inventory_page():
 
     # 요약
     c1, c2, c3 = st.columns(3)
-    c1.metric("총 보유수량", int(df_view["보유수량"].sum()))
-    c2.metric("총 주문수량", int(df_view["주문수량"].sum()))
-    c3.metric("총 남은수량", int(df_view["남은수량"].sum()))
+    c1.metric("총 보유수량", fmt_num(float(df_view["보유수량"].sum()), 2))
+    c2.metric("총 주문수량", fmt_num(float(df_view["주문수량"].sum()), 2))
+    c3.metric("총 남은수량", fmt_num(float(df_view["남은수량"].sum()), 2))
 
     st.markdown("### 재고표 (수정/추가/삭제 가능)")
     edited = st.data_editor(
@@ -761,14 +820,14 @@ def render_inventory_page():
         disabled=["보유수량", "주문수량", "남은수량"],
         column_config={
             "상품명": st.column_config.TextColumn("상품명", required=True),
-            "재고": st.column_config.NumberColumn("재고", min_value=0, step=1, format="%d"),
-            "입고": st.column_config.NumberColumn("입고", min_value=0, step=1, format="%d"),
-            "보유수량": st.column_config.NumberColumn("보유수량", format="%d"),
-            "1차": st.column_config.NumberColumn("1차", min_value=0, step=1, format="%d"),
-            "2차": st.column_config.NumberColumn("2차", min_value=0, step=1, format="%d"),
-            "3차": st.column_config.NumberColumn("3차", min_value=0, step=1, format="%d"),
-            "주문수량": st.column_config.NumberColumn("주문수량", format="%d"),
-            "남은수량": st.column_config.NumberColumn("남은수량", format="%d"),
+            "재고": st.column_config.NumberColumn("재고", min_value=0, step=0.01, format="%g"),
+            "입고": st.column_config.NumberColumn("입고", min_value=0, step=0.01, format="%g"),
+            "보유수량": st.column_config.NumberColumn("보유수량", format="%g"),
+            "1차": st.column_config.NumberColumn("1차", min_value=0, step=0.01, format="%g"),
+            "2차": st.column_config.NumberColumn("2차", min_value=0, step=0.01, format="%g"),
+            "3차": st.column_config.NumberColumn("3차", min_value=0, step=0.01, format="%g"),
+            "주문수량": st.column_config.NumberColumn("주문수량", format="%g"),
+            "남은수량": st.column_config.NumberColumn("남은수량", format="%g"),
         },
         key="inventory_editor",
     )
@@ -951,6 +1010,7 @@ def render_pdf_page():
             })
 
         df_long = pd.DataFrame(rows)
+        st.session_state["last_sum_df_long"] = df_long.copy()
 
         # ✅ 화면은 "위→아래" 순서로 보이도록 세로우선 배치
         df_wide = to_3_per_row(df_long, 3)
@@ -958,7 +1018,7 @@ def render_pdf_page():
         st.subheader("🧾 제품별 합계")
         st.dataframe(df_wide, use_container_width=True, hide_index=True)
 
-        # ✅ 버튼 2개를 "옆에" 배치: PDF / 스크린샷(PNG 1장)
+        # ✅ 버튼 3개를 "옆에" 배치: PDF / 스크린샷(PNG 1장) / 재고등록
         try:
             pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
 
@@ -966,7 +1026,7 @@ def render_pdf_page():
             sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
             sum_png_one = merge_png_pages_to_one(sum_imgs)
 
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 st.download_button(
                     "📄 PDF 다운로드(제품별합계)",
@@ -983,6 +1043,30 @@ def render_pdf_page():
                     mime="image/png",
                     use_container_width=True,
                 )
+            with c3:
+                if st.button("📝 재고등록", use_container_width=True):
+                    st.session_state["show_register_panel"] = True
+
+            if st.session_state.get("show_register_panel"):
+                st.markdown("#### 📝 재고등록 (1차/2차/3차)")
+                target = st.radio("등록할 차수", ["1차", "2차", "3차"], horizontal=True, key="register_target")
+                add_mode = st.checkbox("기존 값에 누적(더하기)", value=False, key="register_add_mode")
+
+                colR1, colR2 = st.columns([1, 3])
+                with colR1:
+                    do_reg = st.button("✅ 등록", use_container_width=True, key="do_register_btn")
+                with colR2:
+                    st.caption("※ 재고관리 표에 **이미 존재하는 상품명만** 등록됩니다. (없는 상품은 제외)")
+
+                if do_reg:
+                    sum_df = st.session_state.get("last_sum_df_long")
+                    updated, skipped = register_sum_to_inventory(sum_df, target_col=target, add_mode=add_mode)
+                    st.session_state["show_register_panel"] = False
+
+                    if skipped:
+                        st.warning("등록 제외(재고관리 상품명 없음): " + ", ".join(sorted(set(skipped))))
+                    st.success(f"{target}에 등록 완료! (반영 행: {updated})")
+                    st.info("📦 사이드바의 '재고관리'로 이동하면 확인할 수 있어요.")
 
             # PIL 없으면 여러 페이지 합치기 불가 안내
             if Image is None and len(sum_imgs) > 1:
