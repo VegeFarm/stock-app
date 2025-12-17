@@ -856,30 +856,7 @@ def render_inventory_page():
     st.markdown(
         """
         <style>
-        /* ===== 재고표(st.data_editor / st.dataframe) 전체: 왼쪽 정렬 ===== */
-        /* (1) legacy AG-Grid 기반 */
-        div[data-testid="stDataEditor"] .ag-header-cell-label,
-        div[data-testid="stDataFrame"]  .ag-header-cell-label {
-            justify-content: flex-start !important;
-        }
-        div[data-testid="stDataEditor"] .ag-cell,
-        div[data-testid="stDataFrame"]  .ag-cell,
-        div[data-testid="stDataEditor"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell-value {
-            text-align: left !important;
-        }
-
-        /* (2) role 기반(신규 Grid) */
-        div[data-testid="stDataEditor"] [role="columnheader"],
-        div[data-testid="stDataFrame"]  [role="columnheader"],
-        div[data-testid="stDataEditor"] [role="gridcell"],
-        div[data-testid="stDataFrame"]  [role="gridcell"] {
-            justify-content: flex-start !important;
-            text-align: left !important;
-        }
-
-        /* ===== (상품명/보유수량/남은수량) 헤더/셀 Bold ===== */
-        /* (1) legacy AG-Grid 기반 */
+        /* 헤더 텍스트 Bold */
         div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
         div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
         div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] .ag-header-cell-text,
@@ -889,6 +866,7 @@ def render_inventory_page():
             font-weight: 800 !important;
         }
 
+        /* 셀 값 Bold(폴백) */
         div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
         div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
         div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"],
@@ -903,33 +881,6 @@ def render_inventory_page():
         div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] .ag-cell-value {
             font-weight: 800 !important;
         }
-
-        /* (2) role 기반(신규 Grid) - 컬럼 순서가 [상품명, 재고, 입고, 보유수량, 1차, 2차, 3차, 주문수량, 남은수량]일 때 */
-        div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="1"],
-        div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="4"],
-        div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="9"],
-        div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="1"],
-        div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="4"],
-        div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="9"] {
-            font-weight: 800 !important;
-        }
-
-        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="1"],
-        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="4"],
-        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="9"],
-        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="1"],
-        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="4"],
-        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="9"] {
-            font-weight: 800 !important;
-        }
-        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="1"] *,
-        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="4"] *,
-        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="9"] *,
-        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="1"] *,
-        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="4"] *,
-        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="9"] * {
-            font-weight: 800 !important;
-        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -938,17 +889,6 @@ def render_inventory_page():
     df_styler = (
         df_view.style
         .applymap(_remain_bg, subset=["남은수량"])
-        # 표 안 데이터 전체 왼쪽 정렬
-        .set_properties(**{"text-align": "left"})
-        # 헤더/셀 왼쪽 정렬(가능한 환경에서만 적용됨)
-        .set_table_styles(
-            [
-                {"selector": "th", "props": [("text-align", "left")]},
-                {"selector": "td", "props": [("text-align", "left")]},
-            ],
-            overwrite=False,
-        )
-        # (상품명/보유수량/남은수량) 값 Bold
         .set_properties(subset=["상품명", "보유수량", "남은수량"], **{"font-weight": "800"})
     )
 
