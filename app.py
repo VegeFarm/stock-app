@@ -843,7 +843,7 @@ def render_inventory_page():
         except Exception:
             return ""
         if x < 0:
-            return "background-color: #ffcccc;"  # 더 연한 빨강
+            return "background-color: #ffb3b3;"  # 연한 빨강
         if 0 <= x <= 10:
             return "background-color: #ffd6e7;"  # 연분홍
         if x >= 30:
