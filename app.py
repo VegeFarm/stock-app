@@ -11,12 +11,18 @@ import streamlit as st
 # -------------------- Optional: AgGrid (one-table edit + conditional color) --------------------
 try:
     from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
+    try:
+        # 컬럼을 화면에 맞춰 자동으로 줄여서(가로 드래그 최소화)
+        from st_aggrid.shared import ColumnsAutoSizeMode
+    except Exception:
+        ColumnsAutoSizeMode = None
 except Exception:
     AgGrid = None
     GridOptionsBuilder = None
     GridUpdateMode = None
     DataReturnMode = None
     JsCode = None
+    ColumnsAutoSizeMode = None
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -829,11 +835,11 @@ def style_inventory_table(df: pd.DataFrame):
         except Exception:
             return ""
         if v < 0:
-            return "background-color: #ffb3b3; font-weight: 900;"
+            return "background-color: #ffcccc; font-weight: 900;"  # < 0 : 빨강
         if 0 <= v <= 10:
-            return "background-color: #fff2b2; font-weight: 900;"
+            return "background-color: #ffe4ea; font-weight: 900;"  # 0~10 : 연분홍
         if v >= 30:
-            return "background-color: #bfe9ff; font-weight: 900;"
+            return "background-color: #d7ecff; font-weight: 900;"  # >=30 : 연파랑
         return ""
 
     num_cols = [c for c in INVENTORY_COLUMNS if c != "상품명"]
@@ -915,6 +921,21 @@ def render_inventory_page():
 
     df_display = _ensure_one_blank_row(df_display)
 
+    # 표 컬럼 순서를 고정(열 위치 유지)하고, 내부용 _row는 마지막으로 보냄
+    desired_cols = [
+        "상품명",
+        "재고",
+        "입고",
+        "보유수량",
+        "1차",
+        "2차",
+        "3차",
+        "주문수량",
+        "남은수량",
+        "_row",
+    ]
+    df_display = df_display[[c for c in desired_cols if c in df_display.columns]]
+
     # 검색 중일 때만 합계 카드 표시
     if q:
         # df_display는 _row가 포함되어 있으므로, 합계는 실제 컬럼만 기준
@@ -928,8 +949,9 @@ def render_inventory_page():
 
     # 공통: 숫자 컬럼 폭/표 높이(가로 드래그 최소화, 가능한 한 한 화면에)
     def _calc_height(n_rows: int) -> int:
-        # 1행당 약 34px 가정(27개 내외면 한 화면)
-        return max(280, min(980, 85 + int(n_rows) * 34))
+        # 내부 스크롤(드래그) 최소화: 가능한 한 행 수만큼 높이를 키움
+        # (그래도 너무 커지는 건 방지)
+        return max(280, min(3000, 110 + int(n_rows) * 34))
 
     # ✅ 1) AgGrid가 설치되어 있으면: 한 표에서 '편집 + 조건부 색상(남은수량)'까지 완성
     if AgGrid is not None:
@@ -963,15 +985,17 @@ def render_inventory_page():
         gb.configure_grid_options(
             rowSelection="multiple",
             suppressHorizontalScroll=True,   # 가로 드래그 최소화
+            domLayout="autoHeight",         # 표 내부 스크롤 최소화(페이지 스크롤로)
         )
 
         # 숨김/비활성 컬럼
         gb.configure_column("_row", header_name="", hide=True, editable=False)
 
         # 컬럼별 설정(요청: 숫자 열 폭을 절반 정도로)
-        gb.configure_column("상품명", width=190, editable=True, cellStyle=name_style)
+        gb.configure_column("상품명", width=200, editable=True, cellStyle=name_style)
 
-        num_small_w = 78  # 숫자열 폭(기존 대비 작게)
+        # 숫자열 폭: 더 좁게(가로 드래그 없이 한 화면 목표)
+        num_small_w = 56
         gb.configure_column("재고", width=num_small_w, editable=True, type=["numericColumn"])
         gb.configure_column("입고", width=num_small_w, editable=True, type=["numericColumn"])
         gb.configure_column("1차", width=num_small_w, editable=True, type=["numericColumn"])
@@ -981,26 +1005,13 @@ def render_inventory_page():
         # 자동계산(편집 불가) + 강조
         gb.configure_column("보유수량", width=num_small_w, editable=False, type=["numericColumn"], cellStyle=bold_style)
         gb.configure_column("주문수량", width=num_small_w, editable=False, type=["numericColumn"])
-        gb.configure_column("남은수량", width=98, editable=False, type=["numericColumn"], cellStyle=remain_style)
+        gb.configure_column("남은수량", width=76, editable=False, type=["numericColumn"], cellStyle=remain_style)
 
-        # 컬럼 순서 유지(요청)
-        gb.configure_grid_options(
-            columnDefs=[
-                {"field": "상품명"},
-                {"field": "재고"},
-                {"field": "입고"},
-                {"field": "보유수량"},
-                {"field": "1차"},
-                {"field": "2차"},
-                {"field": "3차"},
-                {"field": "주문수량"},
-                {"field": "남은수량"},
-                {"field": "_row"},
-            ]
-        )
+        # 컬럼 순서는 df_display의 열 순서를 그대로 따릅니다.
+        # (st_aggrid GridOptionsBuilder 내부 구현상 columnDefs를 리스트로 직접 넣으면
+        #  일부 버전에서 AttributeError가 발생할 수 있어, 여기서는 사용하지 않습니다.)
 
-        grid = AgGrid(
-            df_display,
+        aggrid_kwargs = dict(
             gridOptions=gb.build(),
             data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
             update_mode=GridUpdateMode.VALUE_CHANGED,
@@ -1009,6 +1020,17 @@ def render_inventory_page():
             height=_calc_height(len(df_display)),
             theme="streamlit",
         )
+        if ColumnsAutoSizeMode is not None:
+            # 모든 컬럼을 화면에 맞춰 한 번에 보이도록(버전별 상수명 차이 대응)
+            _mode = None
+            if hasattr(ColumnsAutoSizeMode, "FIT_ALL_COLUMNS_TO_VIEW"):
+                _mode = ColumnsAutoSizeMode.FIT_ALL_COLUMNS_TO_VIEW
+            elif hasattr(ColumnsAutoSizeMode, "FIT_CONTENTS"):
+                _mode = ColumnsAutoSizeMode.FIT_CONTENTS
+            if _mode is not None:
+                aggrid_kwargs["columns_auto_size_mode"] = _mode
+
+        grid = AgGrid(df_display, **aggrid_kwargs)
 
         edited_df = pd.DataFrame(grid.get("data", []))
         if edited_df.empty:
