@@ -1043,7 +1043,20 @@ def render_inventory_page():
         colA, colB, colC = st.columns([1, 1, 1])
 
         # 삭제: 선택 행(_row 기준) 제거
-        selected = grid.get("selected_rows") or []
+        # st_aggrid 버전별로 selected_rows가 list / DataFrame / None 등으로 들어올 수 있어
+        # pandas 객체에 대해 truthiness(or [])를 평가하면 ValueError(ambiguous) 가 나므로 안전 처리
+        selected_raw = grid.get("selected_rows", None)
+        if selected_raw is None:
+            selected = []
+        elif isinstance(selected_raw, list):
+            selected = selected_raw
+        elif isinstance(selected_raw, pd.DataFrame):
+            selected = selected_raw.to_dict("records")
+        else:
+            try:
+                selected = list(selected_raw)
+            except Exception:
+                selected = []
 
         with colA:
             if st.button("🗑 선택 삭제", use_container_width=True, disabled=(len(selected) == 0)):
