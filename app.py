@@ -759,34 +759,92 @@ def register_sum_to_inventory(sum_df_long: pd.DataFrame, target_col: str, add_mo
 
 
 def inventory_df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="재고표")
-        ws = writer.sheets["재고표"]
-        ws.freeze_panes = "B2"
-        # 간단한 열 너비
-        widths = {
-            "A": 16, "B": 8, "C": 8, "D": 10,
-            "E": 8, "F": 8, "G": 8, "H": 10, "I": 10
-        }
-        for col, w in widths.items():
-            ws.column_dimensions[col].width = w
-    return buf.getvalue()
+    """재고표를 XLSX 바이트로 변환.
+
+    Streamlit Cloud에서 openpyxl 미설치로 ModuleNotFoundError가 나는 경우가 있어,
+    엔진을 순차 시도(openpyxl -> xlsxwriter)하도록 처리.
+    둘 다 없으면 ModuleNotFoundError를 그대로 올린다.
+    """
+
+    last_err: Exception | None = None
+    for engine in ("openpyxl", "xlsxwriter"):
+        buf = io.BytesIO()
+        try:
+            with pd.ExcelWriter(buf, engine=engine) as writer:
+                df.to_excel(writer, index=False, sheet_name="재고표")
+                # openpyxl일 때만 시트 조작(없으면 건너뜀)
+                ws = getattr(writer, "sheets", {}).get("재고표")
+                if ws is not None:
+                    try:
+                        ws.freeze_panes = "B2"
+                        widths = {
+                            "A": 16, "B": 8, "C": 8, "D": 10,
+                            "E": 8, "F": 8, "G": 8, "H": 10, "I": 10
+                        }
+                        for col, w in widths.items():
+                            ws.column_dimensions[col].width = w
+                    except Exception:
+                        # 엔진/버전 차이로 실패해도 파일 생성은 유지
+                        pass
+            return buf.getvalue()
+        except ModuleNotFoundError as e:
+            last_err = e
+            continue
+        except Exception as e:
+            # 다른 예외는 그대로 전달
+            raise
+
+    # 둘 다 미설치
+    if isinstance(last_err, ModuleNotFoundError):
+        raise last_err
+    raise ModuleNotFoundError("엑셀 저장용 엔진(openpyxl/xlsxwriter)을 찾을 수 없습니다.")
 
 
-def style_inventory_preview(df: pd.DataFrame):
-    # 남은수량 색상(음수=빨강, 0=연핑크, 양수=연하늘)
-    def _cell_style(val):
+def style_inventory_table(df: pd.DataFrame):
+    """재고표(보기 탭) 가독성 스타일.
+
+    - 상품명/남은수량: 크게 + 두껍게
+    - 보유수량: 두껍게
+    - 남은수량 조건부 색상
+        * 0 미만: 빨강
+        * 0 이상 10 이하: 노랑
+        * 10 초과 30 미만: 색 없음
+        * 30 이상: 파랑
+    """
+    df = df.copy()
+
+    def _remain_style(val):
         try:
             v = float(val)
         except Exception:
             return ""
         if v < 0:
-            return "background-color: #ffb3b3; font-weight: 700;"
-        if abs(v) < 1e-12:
-            return "background-color: #ffe4e4;"
-        return "background-color: #d9f3ff;"
-    return df.style.applymap(_cell_style, subset=["남은수량"])
+            return "background-color: #ffb3b3; font-weight: 900;"
+        if 0 <= v <= 10:
+            return "background-color: #fff2b2; font-weight: 900;"
+        if v >= 30:
+            return "background-color: #bfe9ff; font-weight: 900;"
+        return ""
+
+    num_cols = [c for c in INVENTORY_COLUMNS if c != "상품명"]
+
+    sty = df.style.applymap(_remain_style, subset=["남은수량"])
+    # 숫자 표시는 보기 좋게(뒤 0 제거)
+    fmt_g = lambda x: ("%g" % x) if isinstance(x, (int, float)) else x
+    sty = sty.format({c: fmt_g for c in num_cols})
+
+    # 가독성: 핵심 컬럼 강조
+    sty = sty.set_properties(subset=["상품명"], **{"font-weight": "900", "font-size": "18px", "text-align": "left"})
+    sty = sty.set_properties(subset=["남은수량"], **{"font-size": "18px"})
+    sty = sty.set_properties(subset=["보유수량"], **{"font-weight": "900"})
+    sty = sty.set_properties(subset=num_cols, **{"text-align": "right"})
+
+    # 헤더/패딩
+    sty = sty.set_table_styles([
+        {"selector": "th", "props": [("font-weight", "800"), ("text-align", "center"), ("background-color", "#f3f4f6")]},
+        {"selector": "td", "props": [("padding", "6px 10px")]},
+    ])
+    return sty
 
 
 def render_inventory_page():
@@ -796,92 +854,146 @@ def render_inventory_page():
     if "inventory_df" not in st.session_state:
         st.session_state["inventory_df"] = load_inventory_df()
 
-    df = st.session_state["inventory_df"].copy()
+    base = compute_inventory_df(st.session_state["inventory_df"]).copy()
+    base = sort_inventory_df(base).reset_index(drop=True)
 
-    # 검색(필터)
-    q = st.text_input("🔎 상품명 검색", value="", placeholder="예: 잎로메인")
-    if q.strip():
-        df_view = df[df["상품명"].astype(str).str.contains(q.strip(), case=False, na=False)].copy()
-    else:
-        df_view = df
+    # 검색(상단)
+    if "inv_search" not in st.session_state:
+        st.session_state["inv_search"] = ""
 
-    # 요약
-    c1, c2, c3 = st.columns(3)
-    c1.metric("총 보유수량", fmt_num(float(df_view["보유수량"].sum()), 2))
-    c2.metric("총 주문수량", fmt_num(float(df_view["주문수량"].sum()), 2))
-    c3.metric("총 남은수량", fmt_num(float(df_view["남은수량"].sum()), 2))
+    colS, colB = st.columns([4, 1])
+    with colS:
+        st.text_input("🔎 상품명 검색", key="inv_search", placeholder="예: 잎로메인")
+    with colB:
+        if st.session_state["inv_search"].strip():
+            if st.button("↩ 전체보기", use_container_width=True):
+                st.session_state["inv_search"] = ""
+                st.rerun()
+        else:
+            st.write("")
 
-    st.markdown("### 재고표 (수정/추가/삭제 가능)")
-    edited = st.data_editor(
-        df_view,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        disabled=["보유수량", "주문수량", "남은수량"],
-        column_config={
-            "상품명": st.column_config.TextColumn("상품명", required=True),
-            "재고": st.column_config.NumberColumn("재고", min_value=0, step=0.01, format="%g"),
-            "입고": st.column_config.NumberColumn("입고", min_value=0, step=0.01, format="%g"),
-            "보유수량": st.column_config.NumberColumn("보유수량", format="%g"),
-            "1차": st.column_config.NumberColumn("1차", min_value=0, step=0.01, format="%g"),
-            "2차": st.column_config.NumberColumn("2차", min_value=0, step=0.01, format="%g"),
-            "3차": st.column_config.NumberColumn("3차", min_value=0, step=0.01, format="%g"),
-            "주문수량": st.column_config.NumberColumn("주문수량", format="%g"),
-            "남은수량": st.column_config.NumberColumn("남은수량", format="%g"),
-        },
-        key="inventory_editor",
-    )
+    q = st.session_state["inv_search"].strip()
 
-    # 편집 결과를 원본 df에 반영(검색 필터 중일 때도 안전하게)
-    #  - edited 는 df_view 기반이므로, 상품명 기준으로 merge/update
-    edited = compute_inventory_df(edited)
-    edited = edited[edited["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+    # 현재 화면에서 보여줄 데이터(검색 필터)
+    def _filter_df(df_in: pd.DataFrame) -> pd.DataFrame:
+        if not q:
+            return df_in
+        return df_in[df_in["상품명"].astype(str).str.contains(q, case=False, na=False)].copy()
 
-    if q.strip():
-        # df에서 해당 상품명들만 교체 + 새로 추가된 상품은 append
-        names_view = set(df_view["상품명"].astype(str))
-        df_rest = df[~df["상품명"].astype(str).isin(names_view)].copy()
-        df_new = pd.concat([df_rest, edited], ignore_index=True)
-    else:
-        df_new = edited
+    df_display = _filter_df(base)
 
-    df_new = compute_inventory_df(df_new)
-    df_new = sort_inventory_df(df_new).reset_index(drop=True)
+    # ---- 탭: 보기 / 편집 ----
+    tab_view, tab_edit = st.tabs(["👀 보기(가독성)", "✏️ 편집(수정/추가/삭제)"])
 
-    # 중복 상품명 경고(원하면 나중에 '자동 합치기' 옵션 추가 가능)
-    dup = df_new["상품명"][df_new["상품명"].duplicated(keep=False)]
-    if len(dup) > 0:
-        st.warning(f"⚠️ 상품명이 중복된 행이 있습니다: {', '.join(sorted(set(dup.astype(str))))}")
+    # (2) 편집 탭에서 먼저 계산(df_new를 만들고), (1) 보기 탭에서 그 결과를 보여주기
+    df_new = base
 
-    # 저장/다운로드
-    colA, colB, colC = st.columns([1, 1, 2])
-    if colA.button("💾 저장", use_container_width=True):
-        st.session_state["inventory_df"] = df_new
-        save_inventory_df(df_new)
-        st.success("저장 완료!")
+    with tab_edit:
+        st.markdown("### 재고표 편집")
+        st.caption("보유수량/주문수량/남은수량은 자동 계산됩니다. (직접 수정 불가)")
 
-    if colB.button("↻ 초기화(0으로)", use_container_width=True):
-        base = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
-        base = compute_inventory_df(base)
-        base = sort_inventory_df(base).reset_index(drop=True)
-        st.session_state["inventory_df"] = base
-        save_inventory_df(base)
-        st.success("초기화 완료!")
-        st.rerun()
+        df_view = _filter_df(base)
+        edited = st.data_editor(
+            df_view,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            disabled=["보유수량", "주문수량", "남은수량"],
+            column_config={
+                "상품명": st.column_config.TextColumn("상품명", required=True),
+                "재고": st.column_config.NumberColumn("재고", min_value=0, step=0.01, format="%g"),
+                "입고": st.column_config.NumberColumn("입고", min_value=0, step=0.01, format="%g"),
+                "보유수량": st.column_config.NumberColumn("보유수량", format="%g"),
+                "1차": st.column_config.NumberColumn("1차", min_value=0, step=0.01, format="%g"),
+                "2차": st.column_config.NumberColumn("2차", min_value=0, step=0.01, format="%g"),
+                "3차": st.column_config.NumberColumn("3차", min_value=0, step=0.01, format="%g"),
+                "주문수량": st.column_config.NumberColumn("주문수량", format="%g"),
+                "남은수량": st.column_config.NumberColumn("남은수량", format="%g"),
+            },
+            key="inventory_editor",
+        )
 
-    xlsx_bytes = inventory_df_to_xlsx_bytes(df_new)
-    colC.download_button(
-        "⬇️ 엑셀 다운로드(.xlsx)",
-        data=xlsx_bytes,
-        file_name=f"재고표_{now_prefix_kst()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+        # 편집 결과를 원본 base에 반영(검색 필터 중일 때도 안전하게)
+        edited = compute_inventory_df(edited)
+        edited = edited[edited["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
 
-    st.markdown("### 미리보기(색상/디자인)")
-    st.dataframe(style_inventory_preview(df_new), use_container_width=True, hide_index=True)
+        if q:
+            names_view = set(df_view["상품명"].astype(str))
+            df_rest = base[~base["상품명"].astype(str).isin(names_view)].copy()
+            df_new = pd.concat([df_rest, edited], ignore_index=True)
+        else:
+            df_new = edited
+
+        df_new = compute_inventory_df(df_new)
+        df_new = sort_inventory_df(df_new).reset_index(drop=True)
+
+        dup = df_new["상품명"][df_new["상품명"].duplicated(keep=False)]
+        if len(dup) > 0:
+            st.warning(f"⚠️ 상품명이 중복된 행이 있습니다: {', '.join(sorted(set(dup.astype(str))))}")
+
+        # 버튼/다운로드: (요청) 1번을 2번 밑으로 → 초기화 위, 저장 아래(세로 배치)
+        colL, colR = st.columns([1, 1])
+
+        with colL:
+            if st.button("↻ 초기화(0으로)", use_container_width=True):
+                base2 = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
+                base2 = compute_inventory_df(base2)
+                base2 = sort_inventory_df(base2).reset_index(drop=True)
+                st.session_state["inventory_df"] = base2
+                save_inventory_df(base2)
+                st.success("초기화 완료!")
+                st.rerun()
+
+            if st.button("💾 저장", use_container_width=True):
+                st.session_state["inventory_df"] = df_new
+                save_inventory_df(df_new)
+                st.success("저장 완료!")
+
+        with colR:
+            try:
+                xlsx_bytes = inventory_df_to_xlsx_bytes(df_new)
+                st.download_button(
+                    "⬇️ 엑셀 다운로드(.xlsx)",
+                    data=xlsx_bytes,
+                    file_name=f"재고표_{now_prefix_kst()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except ModuleNotFoundError:
+                csv_bytes = df_new.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "⬇️ CSV 다운로드(엑셀 대체)",
+                    data=csv_bytes,
+                    file_name=f"재고표_{now_prefix_kst()}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.info("엑셀(.xlsx) 다운로드는 openpyxl(또는 xlsxwriter) 설치가 필요해요. Streamlit Cloud라면 requirements.txt에 openpyxl을 추가하면 해결됩니다.")
+
+    # 편집 결과 기준으로 보기용 데이터 갱신(검색 필터도 동일 적용)
+    df_display = _filter_df(df_new)
+
+    with tab_view:
+        # (요청) 총보유/총주문/총남은: 상품명 검색했을 때만 표시
+        if q:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("총 보유수량", fmt_num(float(df_display["보유수량"].sum()), 2))
+            c2.metric("총 주문수량", fmt_num(float(df_display["주문수량"].sum()), 2))
+            c3.metric("총 남은수량", fmt_num(float(df_display["남은수량"].sum()), 2))
+        else:
+            st.caption("상품명을 검색하면(필터) 위에 합계(총 보유/주문/남은)가 표시됩니다.")
+
+        st.markdown("### 재고표")
+        st.dataframe(
+            style_inventory_table(df_display),
+            use_container_width=True,
+            hide_index=True,
+            height=640,
+        )
+
 
 def render_pdf_page():
+
     st.title("제품별 수량 합산(PDF 업로드)")
 
     if "rules_text" not in st.session_state:
