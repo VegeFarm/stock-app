@@ -853,76 +853,106 @@ def render_inventory_page():
     # NOTE: st.data_editor는 pandas.Styler 스타일을 '비편집(Disabled) 컬럼' 위주로 적용되는 경우가 있어
     #       상품명/보유수량 열 굵기는 CSS로 한 번 더 보강합니다.
     # data_editor(AG Grid)에서 특정 컬럼(상품명/보유수량/남은수량) 글씨를 확실히 Bold 처리(헤더+셀)
-    
-st.markdown(
-    """
-    <style>
-    /* ===== 재고표(st.data_editor / st.dataframe) 공통: 왼쪽 정렬 ===== */
-    div[data-testid="stDataEditor"] [role="columnheader"],
-    div[data-testid="stDataFrame"]  [role="columnheader"] {
-        justify-content: flex-start !important;
-        text-align: left !important;
-    }
-    div[data-testid="stDataEditor"] [role="gridcell"],
-    div[data-testid="stDataFrame"]  [role="gridcell"] {
-        justify-content: flex-start !important;
-        text-align: left !important;
-    }
+    st.markdown(
+        """
+        <style>
+        /* ===== 재고표(st.data_editor / st.dataframe) 전체: 왼쪽 정렬 ===== */
+        /* (1) legacy AG-Grid 기반 */
+        div[data-testid="stDataEditor"] .ag-header-cell-label,
+        div[data-testid="stDataFrame"]  .ag-header-cell-label {
+            justify-content: flex-start !important;
+        }
+        div[data-testid="stDataEditor"] .ag-cell,
+        div[data-testid="stDataFrame"]  .ag-cell,
+        div[data-testid="stDataEditor"] .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell-value {
+            text-align: left !important;
+        }
 
-    /* ===== Bold: 상품명(1), 보유수량(4), 남은수량(9) =====
-       Streamlit 그리드가 aria-colindex를 제공하는 경우에만 적용됩니다.
-       (현재 컬럼 순서: 상품명, 재고, 입고, 보유수량, 1차, 2차, 3차, 주문수량, 남은수량)
-    */
-    div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="1"],
-    div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="4"],
-    div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="9"],
-    div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="1"],
-    div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="4"],
-    div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="9"] {
-        font-weight: 800 !important;
-    }
+        /* (2) role 기반(신규 Grid) */
+        div[data-testid="stDataEditor"] [role="columnheader"],
+        div[data-testid="stDataFrame"]  [role="columnheader"],
+        div[data-testid="stDataEditor"] [role="gridcell"],
+        div[data-testid="stDataFrame"]  [role="gridcell"] {
+            justify-content: flex-start !important;
+            text-align: left !important;
+        }
 
-    div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="1"],
-    div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="4"],
-    div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="9"],
-    div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="1"],
-    div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="4"],
-    div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="9"] {
-        font-weight: 800 !important;
-    }
+        /* ===== (상품명/보유수량/남은수량) 헤더/셀 Bold ===== */
+        /* (1) legacy AG-Grid 기반 */
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
+        div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] .ag-header-cell-text,
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
+        div[data-testid="stDataFrame"]  .ag-header-cell[col-id="남은수량"] .ag-header-cell-text {
+            font-weight: 800 !important;
+        }
 
-    /* 일부 환경에서는 텍스트가 내부 span/div에 들어가므로 한 번 더 */
-    div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="1"] *,
-    div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="4"] *,
-    div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="9"] *,
-    div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="1"] *,
-    div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="4"] *,
-    div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="9"] * {
-        font-weight: 800 !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
+        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
+        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"],
+        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] .ag-cell-value,
+        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"] .ag-cell-value,
+        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"] .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"],
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"],
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"],
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"] .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"] .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] .ag-cell-value {
+            font-weight: 800 !important;
+        }
+
+        /* (2) role 기반(신규 Grid) - 컬럼 순서가 [상품명, 재고, 입고, 보유수량, 1차, 2차, 3차, 주문수량, 남은수량]일 때 */
+        div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="1"],
+        div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="4"],
+        div[data-testid="stDataEditor"] [role="columnheader"][aria-colindex="9"],
+        div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="1"],
+        div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="4"],
+        div[data-testid="stDataFrame"]  [role="columnheader"][aria-colindex="9"] {
+            font-weight: 800 !important;
+        }
+
+        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="1"],
+        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="4"],
+        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="9"],
+        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="1"],
+        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="4"],
+        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="9"] {
+            font-weight: 800 !important;
+        }
+        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="1"] *,
+        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="4"] *,
+        div[data-testid="stDataEditor"] [role="gridcell"][aria-colindex="9"] *,
+        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="1"] *,
+        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="4"] *,
+        div[data-testid="stDataFrame"]  [role="gridcell"][aria-colindex="9"] * {
+            font-weight: 800 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     df_styler = (
         df_view.style
         .applymap(_remain_bg, subset=["남은수량"])
         # 표 안 데이터 전체 왼쪽 정렬
         .set_properties(**{"text-align": "left"})
-        # 헤더(컬럼명) 왼쪽 정렬 + Bold
+        # 헤더/셀 왼쪽 정렬(가능한 환경에서만 적용됨)
         .set_table_styles(
             [
-                {"selector": "th", "props": [("text-align", "left"), ("font-weight", "800")]},
+                {"selector": "th", "props": [("text-align", "left")]},
                 {"selector": "td", "props": [("text-align", "left")]},
             ],
             overwrite=False,
         )
-        # 상품명/보유수량/남은수량 값 Bold
+        # (상품명/보유수량/남은수량) 값 Bold
         .set_properties(subset=["상품명", "보유수량", "남은수량"], **{"font-weight": "800"})
     )
 
-st.markdown("### 재고표 (수정/추가/삭제 가능)")
+    st.markdown("### 재고표 (수정/추가/삭제 가능)")
 
     # 계산값(Disabled 컬럼)이 즉시 반영되도록 '버전 키'를 사용합니다.
     # (st.session_state[위젯키]를 직접 수정하면 StreamlitAPIException이 발생할 수 있습니다.)
