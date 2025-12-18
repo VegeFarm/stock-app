@@ -1174,16 +1174,37 @@ def render_inventory_page():
         st.session_state["inventory_editor_version"] = ver + 1
         st.session_state["inventory_toast"] = "초기화 완료!"
         st.rerun()
-
     if colC.button("📤 내보내기", use_container_width=True):
-        # 현재 편집값(저장 전 포함) 기준으로 스냅샷을 저장합니다.
+        # 현재 편집값(저장 전 포함) 기준으로 스냅샷(엑셀)을 먼저 저장합니다.
         df_export = compute_inventory_df(df_base_new)
         df_export = sort_inventory_df(df_export).reset_index(drop=True)
         df_export = df_export[df_export["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
 
         try:
             date_str, _ = export_inventory_snapshot(df_export)
-            st.session_state["inventory_toast"] = f"내보내기 완료! (사이드바 ▶ 📁 내보내기 폴더 ▶ {date_str})"
+
+            # ✅ 내보내기 후: '남은수량'을 다음 재고로 이관하고,
+            #    (상품명 유지) 입고/1차/2차/3차는 0으로 초기화합니다.
+            df_roll = df_export.copy()
+            df_roll["재고"] = pd.to_numeric(df_roll["남은수량"], errors="coerce").fillna(0.0)
+            for c in ["입고", "1차", "2차", "3차"]:
+                df_roll[c] = 0.0
+
+            # 계산 열 다시 생성
+            df_roll = df_roll[["상품명", "재고", "입고", "1차", "2차", "3차"]]
+            df_roll = compute_inventory_df(df_roll)
+            df_roll = sort_inventory_df(df_roll).reset_index(drop=True)
+            df_roll = df_roll[df_roll["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+
+            st.session_state["inventory_df"] = df_roll
+            save_inventory_df(df_roll)
+
+            # 내보내기 후에도 표가 즉시 갱신되도록 에디터 키 변경
+            st.session_state["inventory_editor_version"] = ver + 1
+            st.session_state["inventory_toast"] = (
+                f"내보내기 완료! 남은수량을 재고로 이관했고, 나머지는 0으로 초기화했습니다. "
+                f"(사이드바 ▶ 📁 내보내기 폴더 ▶ {date_str})"
+            )
             st.session_state["last_export_date"] = date_str
             st.rerun()
         except Exception as e:
