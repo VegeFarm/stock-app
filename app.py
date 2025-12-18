@@ -866,35 +866,6 @@ def render_inventory_page():
             font-weight: 800 !important;
         }
 
-
-        /* ✅ 숫자 컬럼(ag-right-aligned) 강제 왼쪽 정렬 */
-        div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned,
-        div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned {
-          text-align: left !important;
-        }
-        
-        div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned .ag-cell-wrapper,
-        div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned .ag-cell-wrapper {
-          justify-content: flex-start !important;   /* ← 이게 핵심 */
-        }
-        
-        div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned .ag-cell-value {
-          text-align: left !important;
-          width: 100% !important;
-        }
-        
-        /* (추가 안전장치) 숫자셀 클래스까지 커버 */
-        div[data-testid="stDataEditor"] .ag-cell.ag-number-cell,
-        div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell {
-          text-align: left !important;
-        }
-        div[data-testid="stDataEditor"] .ag-cell.ag-number-cell .ag-cell-wrapper,
-        div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell .ag-cell-wrapper {
-          justify-content: flex-start !important;
-        }
-
-
         /* 셀 값 Bold(폴백) */
         div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
         div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
@@ -910,6 +881,50 @@ def render_inventory_page():
         div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] .ag-cell-value {
             font-weight: 800 !important;
         }
+        
+        /* ✅ 재고표 데이터(셀) 왼쪽 정렬 */
+        div[data-testid="stDataEditor"] .ag-cell,
+        div[data-testid="stDataEditor"] .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell,
+        div[data-testid="stDataFrame"]  .ag-cell-value {
+            text-align: left !important;
+        }
+
+        /* ✅ 숫자 셀(기본 오른쪽 정렬) 강제 왼쪽 정렬 */
+        div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned,
+        div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned,
+        div[data-testid="stDataEditor"] .ag-cell.ag-number-cell,
+        div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell {
+            text-align: left !important;
+            justify-content: flex-start !important;
+        }
+
+        div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned .ag-cell-wrapper,
+        div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned .ag-cell-wrapper,
+        div[data-testid="stDataEditor"] .ag-cell.ag-number-cell .ag-cell-wrapper,
+        div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell .ag-cell-wrapper {
+            justify-content: flex-start !important;
+            width: 100% !important;
+        }
+
+        div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned .ag-cell-value,
+        div[data-testid="stDataEditor"] .ag-cell.ag-number-cell .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell .ag-cell-value {
+            text-align: left !important;
+            width: 100% !important;
+        }
+
+        /* (선택) 헤더도 왼쪽 정렬 */
+        div[data-testid="stDataEditor"] .ag-header-cell .ag-header-cell-label,
+        div[data-testid="stDataFrame"]  .ag-header-cell .ag-header-cell-label {
+            justify-content: flex-start !important;
+        }
+        div[data-testid="stDataEditor"] .ag-header-cell-text,
+        div[data-testid="stDataFrame"]  .ag-header-cell-text {
+            text-align: left !important;
+        }
+
         </style>
         """,
         unsafe_allow_html=True,
