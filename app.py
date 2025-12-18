@@ -54,6 +54,67 @@ def now_prefix_kst() -> str:
     return datetime.now(KST).strftime("%Y%m%d_%H%M%S")
 
 
+# -------------------- Export helpers (inventory snapshots) --------------------
+EXPORT_ROOT = "exports"
+
+def kst_date_folder() -> str:
+    return datetime.now(KST).strftime("%Y.%m.%d")
+
+
+def ensure_export_root() -> str:
+    try:
+        os.makedirs(EXPORT_ROOT, exist_ok=True)
+    except Exception:
+        pass
+    return EXPORT_ROOT
+
+
+def export_inventory_snapshot(df: pd.DataFrame) -> tuple[str, str]:
+    """
+    재고표(df)를 exports/YYYY.MM.DD/재고표_YYYY.MM.DD.xlsx 로 저장합니다.
+    같은 날짜에 여러 번 내보내기를 누르면 파일은 덮어씁니다.
+    """
+    ensure_export_root()
+    date_str = kst_date_folder()
+    folder = os.path.join(EXPORT_ROOT, date_str)
+    os.makedirs(folder, exist_ok=True)
+
+    file_path = os.path.join(folder, f"재고표_{date_str}.xlsx")
+    data = inventory_df_to_xlsx_bytes(df)
+    with open(file_path, "wb") as f:
+        f.write(data)
+    return date_str, file_path
+
+
+def list_export_dates() -> list[str]:
+    ensure_export_root()
+    try:
+        names = os.listdir(EXPORT_ROOT)
+    except Exception:
+        return []
+
+    out: list[str] = []
+    for name in names:
+        p = os.path.join(EXPORT_ROOT, name)
+        if os.path.isdir(p) and re.fullmatch(r"\d{4}\.\d{2}\.\d{2}", name):
+            out.append(name)
+
+    out.sort(reverse=True)
+    return out
+
+
+def read_export_xlsx_bytes(date_str: str) -> bytes | None:
+    p = os.path.join(EXPORT_ROOT, date_str, f"재고표_{date_str}.xlsx")
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "rb") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+
 # ✅ 제품별 합계 고정 순서(표에 항상 먼저, 위→아래 기준)
 FIXED_PRODUCT_ORDER = [
     "고수",
@@ -614,6 +675,31 @@ with st.sidebar:
     st.divider()
 
 
+# ---- 📤 내보내기(재고표 스냅샷) ----
+with st.expander("📁 내보내기 폴더", expanded=False):
+    dates = list_export_dates()
+    if not dates:
+        st.caption("내보내기 기록이 없습니다.")
+    else:
+        last = st.session_state.get("last_export_date")
+        if last:
+            st.caption(f"마지막 내보내기: {last}")
+        for d in dates:
+            data = read_export_xlsx_bytes(d)
+            if data is None:
+                st.caption(f"📁 {d} (파일 없음)")
+                continue
+
+            st.download_button(
+                label=f"⬇️ {d} 재고표(.xlsx)",
+                data=data,
+                file_name=f"재고표_{d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"export_dl_{d}",
+            )
+
+
 INVENTORY_FILE = "inventory.csv"
 
 INVENTORY_COLUMNS = [
@@ -1049,14 +1135,22 @@ def render_inventory_page():
         st.session_state["inventory_toast"] = "초기화 완료!"
         st.rerun()
 
-    xlsx_bytes = inventory_df_to_xlsx_bytes(df_view)
-    colC.download_button(
-        "⬇️ 엑셀 다운로드(.xlsx)",
-        data=xlsx_bytes,
-        file_name=f"재고표_{now_prefix_kst()}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    if colC.button("📤 내보내기", use_container_width=True):
+        # 현재 편집값(저장 전 포함) 기준으로 스냅샷을 저장합니다.
+        df_export = compute_inventory_df(df_base_new)
+        df_export = sort_inventory_df(df_export).reset_index(drop=True)
+        df_export = df_export[df_export["상품명"].astype(str).str.strip() != ""].reset_index(drop=True)
+
+        try:
+            date_str, _ = export_inventory_snapshot(df_export)
+            st.session_state["inventory_toast"] = f"내보내기 완료! (사이드바 ▶ 📁 내보내기 폴더 ▶ {date_str})"
+            st.session_state["last_export_date"] = date_str
+            st.rerun()
+        except Exception as e:
+            st.error(f"내보내기 실패: {e}")
+
+
+
 
 
 
