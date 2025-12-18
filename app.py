@@ -856,7 +856,7 @@ def render_inventory_page():
     st.markdown(
         """
         <style>
-        /* 헤더 텍스트 Bold */
+        /* 헤더 텍스트 Bold (상품명/보유수량/남은수량) */
         div[data-testid="stDataEditor"] .ag-header-cell[col-id="상품명"] .ag-header-cell-text,
         div[data-testid="stDataEditor"] .ag-header-cell[col-id="보유수량"] .ag-header-cell-text,
         div[data-testid="stDataEditor"] .ag-header-cell[col-id="남은수량"] .ag-header-cell-text,
@@ -866,19 +866,21 @@ def render_inventory_page():
             font-weight: 800 !important;
         }
 
-        /* 셀 값 Bold(폴백) */
-        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
-        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
-        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"],
-        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] .ag-cell-value,
-        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"] .ag-cell-value,
-        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"],
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] .ag-cell-value {
+        /* 셀 값 Bold(폴백)
+           - AG Grid는 같은 div에 'ag-cell' + 'ag-cell-value'가 같이 붙는 경우가 많아
+             '.ag-cell[...] .ag-cell-value' (띄어쓰기)보다 '.ag-cell[...].ag-cell-value' (붙여쓰기)가 잘 먹습니다. */
+        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"].ag-cell-value,
+        div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"].ag-cell-value,
+        div[data-testid="stDataEditor"] .ag-cell[col-id="남은수량"].ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="상품명"].ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="보유수량"].ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"].ag-cell-value {
+            font-weight: 800 !important;
+        }
+
+        /* 상품명 편집중(input/textarea)도 Bold 유지 */
+        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] input,
+        div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"] textarea {
             font-weight: 800 !important;
         }
         </style>
