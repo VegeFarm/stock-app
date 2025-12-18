@@ -3,6 +3,7 @@ import os
 import shutil
 import re
 import math
+import json
 from decimal import Decimal
 
 from datetime import datetime, timezone, timedelta
@@ -18,7 +19,7 @@ try:
 except Exception:
     requests = None
 
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 try:
     from bs4 import BeautifulSoup  # pip install beautifulsoup4 (선택)
@@ -827,6 +828,217 @@ def _parse_items_from_html_tables(html: str) -> list[tuple[str, str, float]]:
     return items
 
 
+# --- Additional helpers for SPA/JSON pages (Marketbom) ---
+def _norm_key(k: str) -> str:
+    return re.sub(r"[^a-z0-9가-힣]+", "", str(k or "").strip().lower())
+
+
+def _try_float(x) -> float | None:
+    if x is None:
+        return None
+    try:
+        v = float(pd.to_numeric(x, errors="coerce"))
+        if math.isnan(v):
+            return None
+        return v
+    except Exception:
+        try:
+            v = float(str(x).strip())
+            if math.isnan(v):
+                return None
+            return v
+        except Exception:
+            return None
+
+
+def _is_probable_login_html(html: str, final_url: str = "") -> bool:
+    t = (html or "").lower()
+    u = (final_url or "").lower()
+    # URL에 login/auth가 들어가면 거의 확실
+    if any(x in u for x in ["login", "signin", "auth", "account"]):
+        return True
+    # 한국 서비스에서 흔히 보이는 로그인 문구
+    login_hits = [
+        "로그인", "아이디", "비밀번호", "회원가입", "계정", "본인인증",
+        "sign in", "log in", "password", "username",
+    ]
+    hit = sum(1 for x in login_hits if x.lower() in t)
+    return hit >= 2
+
+
+def _extract_next_data_json(html: str) -> object | None:
+    """Next.js의 __NEXT_DATA__ 같이 HTML에 박힌 JSON을 꺼내봅니다."""
+    if not html:
+        return None
+    m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _extract_items_from_json(obj: object) -> list[tuple[str, str, float]]:
+    """JSON 어디에 있든 (이름/수량/규격)처럼 보이는 레코드를 최대한 찾아 items로 변환."""
+    items: list[tuple[str, str, float]] = []
+
+    name_keys = ["제품명", "상품명", "품명", "name", "product", "item", "goods"]
+    qty_keys = ["수량", "qty", "quantity", "count", "ea", "amount", "orderqty", "orderedqty"]
+    spec_keys = ["규격", "spec", "option", "unit", "size", "standard", "packing", "package", "weight"]
+
+    def pick(d: dict, keys: list[str]) -> object | None:
+        if not isinstance(d, dict):
+            return None
+        kn = { _norm_key(k): k for k in d.keys() }
+        for want in keys:
+            w = _norm_key(want)
+            for nk, ok in kn.items():
+                # 포함 매칭 (ex. productName, item_name 등)
+                if w and (w == nk or w in nk or nk in w):
+                    v = d.get(ok)
+                    if v is None:
+                        continue
+                    sv = str(v).strip()
+                    if sv == "" or sv.lower() == "null":
+                        continue
+                    return v
+        return None
+
+    def walk(x: object):
+        if isinstance(x, dict):
+            nm = pick(x, name_keys)
+            qv = pick(x, qty_keys)
+            if nm is not None and qv is not None:
+                qty = _try_float(qv)
+                if qty is not None and qty != 0:
+                    sp = pick(x, spec_keys)
+                    items.append((str(nm).strip(), str(sp or "").strip(), float(qty)))
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(obj)
+
+    # 너무 많이 잡히면(예: 단순 카운트/통계) 중복 제거
+    seen = set()
+    out: list[tuple[str, str, float]] = []
+    for n, sp, q in items:
+        key = (n, sp, q)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((n, sp, q))
+    return out
+
+
+def _find_pdf_urls_any(obj: object) -> list[str]:
+    urls: list[str] = []
+
+    def walk(x: object):
+        if isinstance(x, str):
+            if ".pdf" in x.lower() and x.lower().startswith("http"):
+                urls.append(x.strip())
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                # 키 이름이 pdf/download면 힌트
+                if isinstance(v, str) and any(t in _norm_key(k) for t in ["pdf", "download", "file", "url"]):
+                    if v.lower().startswith("http") and ".pdf" in v.lower():
+                        urls.append(v.strip())
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(obj)
+    # unique preserve order
+    out = []
+    seen = set()
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    return out
+
+
+def _extract_statement_id(url: str) -> str | None:
+    m = re.search(r"/statement/([0-9a-fA-F]{16,})", url or "")
+    if m:
+        return m.group(1)
+    return None
+
+
+def _probe_statement_apis(origin: str, statement_id: str, headers: dict, timeout: int) -> tuple[str, object, str] | None:
+    """SPA가 HTML만 내려줄 때, 같은 오리진에서 가능한 API 후보를 두드려 봅니다."""
+    if not origin or not statement_id:
+        return None
+
+    cand_paths = [
+        f"/api/statement/{statement_id}",
+        f"/api/statements/{statement_id}",
+        f"/api/v1/statement/{statement_id}",
+        f"/api/v1/statements/{statement_id}",
+        f"/api/public/statement/{statement_id}",
+        f"/api/public/statements/{statement_id}",
+        # PDF 직접 엔드포인트로 추정되는 것들
+        f"/api/statement/{statement_id}/pdf",
+        f"/api/statements/{statement_id}/pdf",
+        f"/statement/{statement_id}/pdf",
+        f"/statement/{statement_id}/download",
+    ]
+
+    h_json = dict(headers or {})
+    h_json["Accept"] = "application/json, text/plain, */*"
+
+    for p in cand_paths:
+        api_url = origin.rstrip("/") + p
+        try:
+            rr = requests.get(api_url, headers=h_json, timeout=timeout, allow_redirects=True)
+            if rr.status_code in (401, 403):
+                continue
+            if rr.status_code >= 400:
+                continue
+
+            ctype = (rr.headers.get("content-type") or "").lower()
+            b = rr.content or b""
+            if _looks_like_pdf(b, ctype):
+                return ("pdf", b, rr.url)
+
+            # JSON 파싱
+            if "json" in ctype or (b[:1] in [b"{", b"["]):
+                try:
+                    js = rr.json()
+                except Exception:
+                    try:
+                        js = json.loads(b.decode("utf-8", errors="ignore"))
+                    except Exception:
+                        js = None
+
+                if js is not None:
+                    items = _extract_items_from_json(js)
+                    if items:
+                        return ("items", items, rr.url)
+
+                    pdfs = _find_pdf_urls_any(js)
+                    for link in pdfs[:5]:
+                        try:
+                            rr2 = requests.get(link, headers=headers, timeout=timeout, allow_redirects=True)
+                            rr2.raise_for_status()
+                            if _looks_like_pdf(rr2.content or b"", (rr2.headers.get("content-type") or "")):
+                                return ("pdf", rr2.content, rr2.url)
+                        except Exception:
+                            continue
+        except Exception:
+            continue
+
+    return None
+
+
+
 def fetch_statement_from_url(url: str, timeout: int = 20) -> tuple[str, object, str]:
     """
     URL을 받아서 (kind, payload, final_url)을 반환합니다.
@@ -839,36 +1051,52 @@ def fetch_statement_from_url(url: str, timeout: int = 20) -> tuple[str, object, 
     if not url.startswith("http"):
         raise ValueError("URL을 정확히 입력해주세요. (https:// 로 시작)")
 
+    # Marketbom은 종종 UA/Referer에 민감할 수 있어 기본 헤더를 넉넉히 줍니다.
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": url,
     }
 
     r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-    r.raise_for_status()
-
+    status = r.status_code
     ctype = (r.headers.get("content-type") or "").lower()
     content = r.content or b""
     final_url = r.url
+
+    # 접근 제한 빠른 감지
+    if status in (401, 403):
+        raise RuntimeError(f"접근이 거부되었습니다. (HTTP {status})\n- 로그인/권한이 필요한 URL일 수 있어요.\n- 가능하면 'PDF 다운로드 링크'를 직접 붙여넣거나 PDF 파일 업로드를 이용해주세요.\n- final_url={final_url}\n- content-type={ctype}")
 
     # 1) 바로 PDF가 내려오는 경우
     if _looks_like_pdf(content, ctype):
         return "pdf", content, final_url
 
-    # 2) HTML이면: (A) 테이블 파싱 시도 → (B) 다운로드 링크에서 PDF 찾기
-    is_html = ("text/html" in ctype) or (b"<html" in content[:300].lower()) or (content[:15].lower().startswith(b"<!doctype"))
+    # 2) HTML이면: (A) 테이블 파싱 → (B) 다운로드 링크 → (C) Next.js JSON → (D) API 후보 탐색
+    is_html = ("text/html" in ctype) or (b"<html" in content[:400].lower()) or (content[:20].lower().startswith(b"<!doctype"))
     if is_html:
         html = content.decode(r.encoding or "utf-8", errors="ignore")
+
+        # 로그인 페이지로 떨어졌는지 감지
+        if _is_probable_login_html(html, final_url=final_url):
+            raise RuntimeError(
+                "페이지가 '로그인 화면'으로 응답된 것으로 보입니다.\n"
+                "이 경우 서버(Streamlit)에서 해당 거래명세서를 직접 가져올 수 없습니다.\n"
+                "- 해결 1) 거래명세서의 'PDF 다운로드 링크'를 직접 붙여넣기\n"
+                "- 해결 2) PDF 파일을 다운받아 업로드\n"
+                f"- final_url={final_url}"
+            )
 
         # A) HTML 테이블로부터 직접 items 추정
         items = _parse_items_from_html_tables(html)
         if items:
             return "items", items, final_url
 
-        # B) PDF/엑셀 다운로드 링크 후보 찾기
+        # B) PDF/엑셀 다운로드 링크 후보 찾기 (a[href], iframe, embed, script 등)
         cand_links = _extract_candidate_links_from_html(html, base_url=final_url)
-
         # PDF가 우선
-        for link in cand_links[:50]:
+        for link in cand_links:
             try:
                 rr = requests.get(link, headers=headers, timeout=timeout, allow_redirects=True)
                 rr.raise_for_status()
@@ -879,9 +1107,63 @@ def fetch_statement_from_url(url: str, timeout: int = 20) -> tuple[str, object, 
             except Exception:
                 continue
 
-        raise RuntimeError("페이지에서 PDF/테이블 데이터를 찾지 못했습니다. (로그인/권한/다운로드 링크 구조 확인 필요)")
+        # C) SPA(Next.js 등)에서 __NEXT_DATA__ JSON 안에 데이터/다운로드 링크가 박혀있는 경우
+        nxt = _extract_next_data_json(html)
+        if nxt is not None:
+            items2 = _extract_items_from_json(nxt)
+            if items2:
+                return "items", items2, final_url
+            pdfs = _find_pdf_urls_any(nxt)
+            for link in pdfs[:5]:
+                try:
+                    rr = requests.get(link, headers=headers, timeout=timeout, allow_redirects=True)
+                    rr.raise_for_status()
+                    if _looks_like_pdf(rr.content or b"", (rr.headers.get("content-type") or "")):
+                        return "pdf", rr.content, rr.url
+                except Exception:
+                    continue
 
-    # 3) 기타(JSON 등)에서 PDF URL 패턴이 있을 수도 있어 regex로 한 번 더 시도
+        # D) HTML에 데이터가 없고 JS로만 렌더링되는 경우: statement_id로 API 후보 자동 탐색
+        sid = _extract_statement_id(final_url) or _extract_statement_id(url)
+        if sid:
+            sp = urlsplit(final_url)
+            origin = f"{sp.scheme}://{sp.netloc}"
+            got = _probe_statement_apis(origin, sid, headers=headers, timeout=timeout)
+            if got is not None:
+                return got
+
+        # E) 마지막: HTML 안에서 PDF URL 패턴을 regex로 한번 더 시도
+        try:
+            m = re.search(r'(https?://[^\s"\'<>]+?\.pdf(\?[^\s"\'<>]+)?)', html, re.IGNORECASE)
+            if m:
+                link = m.group(1)
+                rr = requests.get(link, headers=headers, timeout=timeout, allow_redirects=True)
+                rr.raise_for_status()
+                if _looks_like_pdf(rr.content or b"", (rr.headers.get("content-type") or "")):
+                    return "pdf", rr.content, rr.url
+        except Exception:
+            pass
+
+        # 여기까지 왔으면: 대부분 "로그인 필요" 또는 "JS/API 구조 변경" 케이스
+        title = ""
+        try:
+            mt = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            if mt:
+                title = re.sub(r"\s+", " ", mt.group(1)).strip()[:120]
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "페이지에서 PDF/테이블/JSON 데이터를 찾지 못했습니다.\n"
+            "가능한 원인: (1) 로그인/권한 필요 (2) JS로만 렌더링되어 서버에서 HTML만 받는 구조 (3) 다운로드/API 경로 변경\n"
+            f"- HTTP {status}\n"
+            f"- content-type={ctype}\n"
+            f"- final_url={final_url}\n"
+            + (f"- title={title}\n" if title else "")
+            + "팁: 거래명세서 화면에서 'PDF 다운로드' 버튼을 눌러 나온 '직접 PDF 링크'를 붙여넣으면 성공률이 높습니다."
+        )
+
+    # 3) JSON 등(HTML이 아닌데 PDF도 아님)에서 PDF URL 패턴이 있을 수도 있어 regex로 한 번 더 시도
     try:
         txt = content.decode("utf-8", errors="ignore")
         m = re.search(r'(https?://[^\s"\'<>]+?\.pdf(\?[^\s"\'<>]+)?)', txt, re.IGNORECASE)
@@ -894,44 +1176,8 @@ def fetch_statement_from_url(url: str, timeout: int = 20) -> tuple[str, object, 
     except Exception:
         pass
 
-    raise RuntimeError(f"지원되지 않는 응답 형식입니다. (content-type={ctype})")
+    raise RuntimeError(f"지원되지 않는 응답 형식입니다. (HTTP {status}, content-type={ctype}, final_url={final_url})")
 
-
-# -------------------- Streamlit UI --------------------
-st.set_page_config(
-    page_title="재고프로그램",
-    page_icon="assets/favicon.png",  # ✅ 로고 파비콘
-    layout="wide",
-)
-
-# ----- Navigation -----
-if "page" not in st.session_state:
-    st.session_state["page"] = "pdf_sum"
-
-with st.sidebar:
-    st.markdown("## 📌 메뉴")
-    if st.button("📄 PDF 제품별합계", use_container_width=True):
-        st.session_state["page"] = "pdf_sum"
-        st.rerun()
-    if st.button("📦 재고관리", use_container_width=True):
-        st.session_state["page"] = "inventory"
-        st.rerun()
-    st.divider()
-
-
-INVENTORY_FILE = "inventory.csv"
-
-INVENTORY_COLUMNS = [
-    "상품명",
-    "재고",
-    "입고",
-    "보유수량",
-    "1차",
-    "2차",
-    "3차",
-    "주문수량",
-    "남은수량",
-]
 
 
 def _coerce_num_series(s: pd.Series) -> pd.Series:
