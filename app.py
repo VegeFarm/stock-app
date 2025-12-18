@@ -1,5 +1,6 @@
 import io
 import os
+import shutil
 import re
 import math
 from decimal import Decimal
@@ -112,6 +113,25 @@ def read_export_xlsx_bytes(date_str: str) -> bytes | None:
             return f.read()
     except Exception:
         return None
+
+def delete_export_date(date_str: str) -> bool:
+    """exports/YYYY.MM.DD 폴더(해당 날짜 내보내기)를 통째로 삭제"""
+    ensure_export_root()
+    if not re.fullmatch(r"\d{4}\.\d{2}\.\d{2}", (date_str or "")):
+        return False
+
+    folder = os.path.join(EXPORT_ROOT, date_str)
+
+    # 안전장치: exports 폴더 밖을 삭제하지 않도록 경로 검증
+    root_abs = os.path.abspath(EXPORT_ROOT)
+    folder_abs = os.path.abspath(folder)
+    if not folder_abs.startswith(root_abs):
+        return False
+
+    if os.path.isdir(folder_abs):
+        shutil.rmtree(folder_abs)
+        return True
+    return False
 
 
 
@@ -675,31 +695,6 @@ with st.sidebar:
     st.divider()
 
 
-# ---- 📤 내보내기(재고표 스냅샷) ----
-with st.expander("📁 내보내기 폴더", expanded=False):
-    dates = list_export_dates()
-    if not dates:
-        st.caption("내보내기 기록이 없습니다.")
-    else:
-        last = st.session_state.get("last_export_date")
-        if last:
-            st.caption(f"마지막 내보내기: {last}")
-        for d in dates:
-            data = read_export_xlsx_bytes(d)
-            if data is None:
-                st.caption(f"📁 {d} (파일 없음)")
-                continue
-
-            st.download_button(
-                label=f"⬇️ {d} 재고표(.xlsx)",
-                data=data,
-                file_name=f"재고표_{d}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key=f"export_dl_{d}",
-            )
-
-
 INVENTORY_FILE = "inventory.csv"
 
 INVENTORY_COLUMNS = [
@@ -906,6 +901,52 @@ def style_inventory_preview(df: pd.DataFrame):
 
 def render_inventory_page():
     st.title("재고관리")
+
+    # ---- 📁 내보내기 폴더(재고관리에서만 표시) ----
+    with st.sidebar:
+        st.divider()
+        with st.expander("📁 내보내기 폴더", expanded=False):
+            dates = list_export_dates()
+            if not dates:
+                st.caption("내보내기 기록이 없습니다.")
+            else:
+                last = st.session_state.get("last_export_date")
+                if last:
+                    st.caption(f"마지막 내보내기: {last}")
+
+                st.caption("※ 삭제하면 복구할 수 없습니다.")
+                for d in dates:
+                    data = read_export_xlsx_bytes(d)
+                    row1, row2 = st.columns([3, 1])
+
+                    with row1:
+                        if data is None:
+                            st.caption(f"📁 {d} (파일 없음)")
+                        else:
+                            st.download_button(
+                                label=f"⬇️ {d} 재고표(.xlsx)",
+                                data=data,
+                                file_name=f"재고표_{d}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True,
+                                key=f"export_dl_{d}",
+                            )
+
+                    with row2:
+                        if st.button("🗑️", use_container_width=True, key=f"export_del_{d}"):
+                            ok = False
+                            try:
+                                ok = delete_export_date(d)
+                            except Exception:
+                                ok = False
+
+                            if ok:
+                                if st.session_state.get("last_export_date") == d:
+                                    st.session_state["last_export_date"] = None
+                                st.session_state["inventory_toast"] = f"{d} 내보내기 삭제 완료!"
+                                st.rerun()
+                            else:
+                                st.error("삭제 실패: 폴더/파일을 확인해주세요.")
 
     msg = st.session_state.pop("inventory_toast", None)
     if msg:
