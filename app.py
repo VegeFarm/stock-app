@@ -39,6 +39,14 @@ try:
 except Exception:
     Image = None
 
+
+# -------------------- OCR (image -> text) --------------------
+try:
+    import pytesseract  # pip install pytesseract  (※ tesseract-ocr 엔진은 별도 설치 필요)
+except Exception:
+    pytesseract = None
+
+
 # -------------------- PDF image render (screenshot) --------------------
 try:
     import fitz  # PyMuPDF (pymupdf)
@@ -897,6 +905,135 @@ def fetch_statement_from_url(url: str, timeout: int = 20) -> tuple[str, object, 
     raise RuntimeError(f"지원되지 않는 응답 형식입니다. (content-type={ctype})")
 
 
+
+# -------------------- OCR helpers (Image -> items) --------------------
+def _preprocess_image_for_ocr(pil_img):
+    """
+    OCR 인식률을 올리기 위한 간단 전처리(PIL 기반).
+    - 흑백, 리사이즈, 대비 강화, 이진화
+    """
+    try:
+        from PIL import ImageOps, ImageEnhance
+    except Exception:
+        return pil_img
+
+    img = pil_img.convert("RGB")
+
+    # 너무 작은 이미지는 확대
+    w, h = img.size
+    if max(w, h) < 1400:
+        scale = 2.0
+        img = img.resize((int(w * scale), int(h * scale)))
+
+    img = ImageOps.grayscale(img)
+    img = ImageOps.autocontrast(img)
+
+    # 대비 강화
+    img = ImageEnhance.Contrast(img).enhance(1.8)
+    img = ImageEnhance.Sharpness(img).enhance(1.2)
+
+    # 이진화(임계값)
+    img = img.point(lambda x: 0 if x < 165 else 255, "1")
+    return img
+
+
+def ocr_image_bytes_to_text(image_bytes: bytes, lang: str = "kor+eng", tesseract_cmd: str | None = None) -> str:
+    """
+    캡처 이미지(PNG/JPG) -> OCR 텍스트
+    """
+    if pytesseract is None:
+        raise RuntimeError("OCR을 사용하려면 pytesseract 설치가 필요합니다. (pip install pytesseract)")
+    if Image is None:
+        raise RuntimeError("OCR을 사용하려면 Pillow(PIL) 설치가 필요합니다. (pip install pillow)")
+
+    if tesseract_cmd:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+        except Exception:
+            pass
+
+    pil_img = Image.open(io.BytesIO(image_bytes))
+    pil_img = _preprocess_image_for_ocr(pil_img)
+
+    # --psm 6: 균일한 블록/표 형태에 무난
+    config = "--psm 6"
+    txt = pytesseract.image_to_string(pil_img, lang=lang, config=config)
+    return txt or ""
+
+
+def parse_items_flexible(lines: list[str]) -> list[tuple[str, str, int]]:
+    """
+    OCR 텍스트처럼 노이즈가 섞여도 최대한 (제품,규격,수량) 추출.
+    수량은 마지막 토큰 숫자를 우선 신뢰합니다.
+    """
+    items: list[tuple[str, str, int]] = []
+    pending: tuple[str, str] | None = None
+
+    for ln in lines:
+        ln = (ln or "").strip()
+        if not ln:
+            continue
+
+        # 헤더/잡문 스킵
+        if ("제품" in ln and "수량" in ln) or ln in ("▣ 제품별 개수", "제품명 구분 수량"):
+            continue
+
+        # 구분자 정리
+        ln = ln.replace("|", " ").replace("／", "/").replace("·", " ").replace("\t", " ")
+        ln = re.sub(r"\s+", " ", ln).strip()
+
+        # 순수 숫자(수량만 따로 나온 경우)
+        ln_num = ln.replace(",", "")
+        if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", ln_num):
+            if pending is not None:
+                product, spec = pending
+                try:
+                    qty = int(round(float(ln_num)))
+                except Exception:
+                    qty = 0
+                if qty > 0:
+                    items.append((product, spec, qty))
+                pending = None
+            continue
+
+        # 마지막이 숫자인 경우: "청경채 4kg 2"
+        m = re.match(r"^(.*?)(?:\s+)([-+]?\d+(?:[.,]\d+)?)$", ln)
+        if m:
+            main = m.group(1).strip()
+            qraw = m.group(2).replace(",", "")
+            try:
+                qty = int(round(float(qraw)))
+            except Exception:
+                qty = 0
+            if qty <= 0:
+                pending = None
+                continue
+
+            toks = main.split()
+            if not toks:
+                continue
+            product = toks[0]
+            spec = " ".join(toks[1:]) if len(toks) > 1 else ""
+            items.append((product, spec, qty))
+            pending = None
+            continue
+
+        # 그 외: 다음 줄이 수량일 수 있으니 pending
+        toks = ln.split()
+        if not toks:
+            continue
+        product = toks[0]
+        spec = " ".join(toks[1:]) if len(toks) > 1 else ""
+        pending = (product, spec)
+
+    return items
+
+
+def ocr_text_to_items(text: str) -> list[tuple[str, str, int]]:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return parse_items_flexible(lines)
+
+
 # -------------------- Streamlit UI --------------------
 st.set_page_config(
     page_title="재고프로그램",
@@ -1491,6 +1628,22 @@ def render_pdf_page():
                 mime="text/plain",
             )
 
+
+
+        with st.expander("📷 OCR 설정(캡처 이미지)", expanded=False):
+            st.caption("※ 캡처 이미지를 OCR로 읽어 '제품별 합계'로 처리합니다.")
+            st.text_input(
+                "tesseract 경로(Windows만/선택)",
+                key="tesseract_cmd_path",
+                placeholder="C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            )
+            st.text_input(
+                "OCR 언어(기본: kor+eng)",
+                key="ocr_lang",
+                value=st.session_state.get("ocr_lang", "kor+eng"),
+            )
+            st.caption("Streamlit Cloud라면 packages.txt에 tesseract-ocr / tesseract-ocr-kor가 필요할 수 있어요.")
+
     pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
 
     # -------------------- 🔗 URL로 불러오기(선택) --------------------
@@ -1523,25 +1676,95 @@ def render_pdf_page():
             st.success("URL 데이터 초기화 완료!")
             st.rerun()
 
+    
+    # -------------------- 📷 캡처 이미지(OCR)로 불러오기(선택) --------------------
+    st.markdown("#### 📷 캡처 이미지로 불러오기(OCR) (선택)")
+    img_col1, img_col2 = st.columns([3, 1])
+
+    with img_col1:
+        img_up = st.file_uploader(
+            "캡처 이미지 업로드 (PNG/JPG) — 브라우저에서 붙여넣기(Ctrl+V)는 환경에 따라 제한될 수 있어요.",
+            type=["png", "jpg", "jpeg"],
+            key="stmt_img_upload",
+        )
+        if img_up is not None:
+            st.image(img_up, caption="업로드된 캡처 이미지", use_column_width=True)
+
+    with img_col2:
+        if st.button("OCR 읽기", use_container_width=True, key="stmt_img_ocr_btn"):
+            if img_up is None:
+                st.error("먼저 캡처 이미지를 업로드해주세요.")
+            else:
+                try:
+                    lang = st.session_state.get("ocr_lang", "kor+eng")
+                    cmd = (st.session_state.get("tesseract_cmd_path") or "").strip() or None
+                    txt = ocr_image_bytes_to_text(img_up.getvalue(), lang=lang, tesseract_cmd=cmd)
+
+                    st.session_state["ocr_text"] = txt
+                    st.session_state["ocr_text_edit"] = txt
+                    st.session_state["ocr_loaded_at"] = now_prefix_kst()
+                    st.success("OCR 완료! 아래 텍스트를 확인/수정 후 '이 텍스트로 합산'을 눌러주세요.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"OCR 실패: {e}")
+
+    if "ocr_text_edit" in st.session_state:
+        st.text_area("OCR 결과(수정/붙여넣기 가능)", key="ocr_text_edit", height=220)
+
+        o1, o2, o3 = st.columns([1, 1, 2])
+        with o1:
+            if st.button("이 텍스트로 합산", use_container_width=True, key="ocr_to_items_btn"):
+                try:
+                    items = ocr_text_to_items(st.session_state.get("ocr_text_edit", ""))
+                    if not items:
+                        st.error("텍스트에서 (제품/수량) 데이터를 찾지 못했습니다. OCR 결과를 직접 수정해보세요.")
+                    else:
+                        st.session_state["ocr_kind"] = "items"
+                        st.session_state["ocr_payload"] = items
+                        st.success(f"합산 변환 완료! (인식 행: {len(items)})")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"합산 변환 실패: {e}")
+
+        with o2:
+            if st.button("OCR 초기화", use_container_width=True, key="ocr_clear_btn"):
+                for k in ["ocr_text", "ocr_text_edit", "ocr_kind", "ocr_payload", "ocr_loaded_at"]:
+                    st.session_state.pop(k, None)
+                st.success("OCR 데이터 초기화 완료!")
+                st.rerun()
+
+        with o3:
+            st.caption("팁: 인식이 이상하면 위 OCR 결과 텍스트에서 제품명/수량을 직접 고치고 다시 합산하면 됩니다.")
+
+
     uploaded = st.file_uploader("📎 PDF 업로드", type=["pdf"])
 
     # 우선순위: 업로드 PDF > URL에서 불러온 데이터(거래명세서)
     use_kind = None
     file_bytes = None
     file_name = None
+    items_source = None
+    items_raw = None
 
     if uploaded:
         use_kind = "pdf"
         file_bytes = uploaded.getvalue()
-        file_name = file_name
+        file_name = getattr(uploaded, "name", None) or "uploaded.pdf"
 
     elif st.session_state.get("stmt_url_kind") == "pdf":
         use_kind = "pdf"
         file_bytes = st.session_state.get("stmt_url_payload")
         file_name = f"statement_url_{st.session_state.get('stmt_url_loaded_at', now_prefix_kst())}.pdf"
 
+    elif st.session_state.get("ocr_kind") == "items":
+        use_kind = "items"
+        items_source = "ocr"
+        items_raw = st.session_state.get("ocr_payload") or []
+
     elif st.session_state.get("stmt_url_kind") == "items":
         use_kind = "items"
+        items_source = "url"
+        items_raw = st.session_state.get("stmt_url_payload") or []
 
     if use_kind == "pdf":
 
@@ -1682,8 +1905,8 @@ def render_pdf_page():
             st.error(f"제품별 합계 PDF/PNG 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
 
     elif use_kind == "items":
-        # URL에서 테이블 데이터를 직접 읽어온 경우(원본 PDF 없음)
-        items_raw = st.session_state.get("stmt_url_payload") or []
+        # URL/OCR에서 items만 받은 경우(원본 PDF 없음)
+        items_raw = items_raw or []
         # (제품명 셀에 규격이 같이 붙어오는 케이스 대비)
         items = []
         for name, spec, qty in items_raw:
@@ -1703,7 +1926,7 @@ def render_pdf_page():
             items.append((product, spec2, q))
 
         # ✅ "다운로드 시각" prefix (URL 로딩 시각 기준)
-        fixed_prefix = st.session_state.get("stmt_url_loaded_at") or now_prefix_kst()
+        fixed_prefix = (st.session_state.get("ocr_loaded_at") if items_source == "ocr" else st.session_state.get("stmt_url_loaded_at")) or now_prefix_kst()
 
         # ---- 제품별 합계(HTML items 기반) ----
         agg = aggregate(items)
