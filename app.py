@@ -881,37 +881,40 @@ def render_inventory_page():
         div[data-testid="stDataFrame"]  .ag-cell[col-id="남은수량"] .ag-cell-value {
             font-weight: 800 !important;
         }
-        
-        /* ✅ 재고표 데이터(셀) 왼쪽 정렬 */
-        div[data-testid="stDataEditor"] .ag-cell,
-        div[data-testid="stDataEditor"] .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell,
-        div[data-testid="stDataFrame"]  .ag-cell-value {
+
+        /* ✅ 재고표 데이터(셀) 전체 왼쪽 정렬 (숫자 포함) */
+        div[data-testid="stDataEditor"] .ag-center-cols-container .ag-cell[col-id],
+        div[data-testid="stDataFrame"]  .ag-center-cols-container .ag-cell[col-id] {
+            text-align: left !important;
+            justify-content: flex-start !important;
+        }
+        div[data-testid="stDataEditor"] .ag-center-cols-container .ag-cell[col-id] .ag-cell-wrapper,
+        div[data-testid="stDataFrame"]  .ag-center-cols-container .ag-cell[col-id] .ag-cell-wrapper {
+            justify-content: flex-start !important;
+            width: 100% !important;
+        }
+        div[data-testid="stDataEditor"] .ag-center-cols-container .ag-cell[col-id] .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-center-cols-container .ag-cell[col-id] .ag-cell-value {
+            text-align: left !important;
+            width: 100% !important;
+        }
+        div[data-testid="stDataEditor"] .ag-center-cols-container .ag-cell[col-id] input,
+        div[data-testid="stDataFrame"]  .ag-center-cols-container .ag-cell[col-id] input {
             text-align: left !important;
         }
 
-        /* ✅ 숫자 셀(기본 오른쪽 정렬) 강제 왼쪽 정렬 */
+        /* 숫자 기본 오른쪽 정렬 클래스 강제 override */
         div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned,
         div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned,
         div[data-testid="stDataEditor"] .ag-cell.ag-number-cell,
         div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell {
             text-align: left !important;
-            justify-content: flex-start !important;
         }
-
         div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned .ag-cell-wrapper,
         div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned .ag-cell-wrapper,
         div[data-testid="stDataEditor"] .ag-cell.ag-number-cell .ag-cell-wrapper,
         div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell .ag-cell-wrapper {
             justify-content: flex-start !important;
-            width: 100% !important;
-        }
-
-        div[data-testid="stDataEditor"] .ag-cell.ag-right-aligned .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell.ag-right-aligned .ag-cell-value,
-        div[data-testid="stDataEditor"] .ag-cell.ag-number-cell .ag-cell-value,
-        div[data-testid="stDataFrame"]  .ag-cell.ag-number-cell .ag-cell-value {
-            text-align: left !important;
             width: 100% !important;
         }
 
@@ -930,9 +933,39 @@ def render_inventory_page():
         unsafe_allow_html=True,
     )
 
+    df_display = df_view.copy()
+
+    # ✅ 숫자도 '텍스트'로 보여주면 Streamlit 표에서 기본적으로 왼쪽 정렬됩니다.
+    #    (저장 시에는 아래 _base_view()에서 다시 숫자로 변환합니다.)
+    def _fmt_num(v):
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return "0"
+        try:
+            x = float(v)
+            # -0.0 같은 표시 방지
+            if abs(x) < 1e-12:
+                x = 0.0
+            if float(x).is_integer():
+                return str(int(round(x)))
+            return format(x, "g")
+        except Exception:
+            s = str(v).strip()
+            return s if s else "0"
+
+    for c in ["재고", "입고", "보유수량", "1차", "2차", "3차", "주문수량", "남은수량"]:
+        if c in df_display.columns:
+            df_display[c] = df_display[c].map(_fmt_num)
+
+    def _remain_bg_any(v):
+        try:
+            x = float(str(v).replace(",", "").strip())
+        except Exception:
+            return ""
+        return _remain_bg(x)
+
     df_styler = (
-        df_view.style
-        .applymap(_remain_bg, subset=["남은수량"])
+        df_display.style
+        .applymap(_remain_bg_any, subset=["남은수량"])
         .set_properties(subset=["상품명", "보유수량", "남은수량"], **{"font-weight": "800"})
     )
 
@@ -951,14 +984,14 @@ def render_inventory_page():
         disabled=["보유수량", "주문수량", "남은수량"],
         column_config={
             "상품명": st.column_config.TextColumn("상품명", required=True),
-            "재고": st.column_config.NumberColumn("재고", min_value=0, step=0.01, format="%g"),
-            "입고": st.column_config.NumberColumn("입고", min_value=0, step=0.01, format="%g"),
-            "보유수량": st.column_config.NumberColumn("보유수량", format="%g"),
-            "1차": st.column_config.NumberColumn("1차", min_value=0, step=0.01, format="%g"),
-            "2차": st.column_config.NumberColumn("2차", min_value=0, step=0.01, format="%g"),
-            "3차": st.column_config.NumberColumn("3차", min_value=0, step=0.01, format="%g"),
-            "주문수량": st.column_config.NumberColumn("주문수량", format="%g"),
-            "남은수량": st.column_config.NumberColumn("남은수량", format="%g"),
+            "재고": st.column_config.TextColumn("재고"),
+            "입고": st.column_config.TextColumn("입고"),
+            "보유수량": st.column_config.TextColumn("보유수량"),
+            "1차": st.column_config.TextColumn("1차"),
+            "2차": st.column_config.TextColumn("2차"),
+            "3차": st.column_config.TextColumn("3차"),
+            "주문수량": st.column_config.TextColumn("주문수량"),
+            "남은수량": st.column_config.TextColumn("남은수량"),
         },
         key=editor_key,
     )
