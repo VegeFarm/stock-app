@@ -866,6 +866,27 @@ def render_inventory_page():
             font-weight: 800 !important;
         }
 
+        /* ✅ 재고표 "데이터(셀)" 왼쪽 정렬 */
+        div[data-testid="stDataEditor"] .ag-cell,
+        div[data-testid="stDataEditor"] .ag-cell .ag-cell-value,
+        div[data-testid="stDataFrame"]  .ag-cell,
+        div[data-testid="stDataFrame"]  .ag-cell .ag-cell-value {
+            text-align: left !important;
+            justify-content: flex-start !important;
+        }
+        
+       
+        /* (선택) 헤더도 왼쪽 정렬 */
+        div[data-testid="stDataEditor"] .ag-header-cell .ag-header-cell-label,
+        div[data-testid="stDataFrame"]  .ag-header-cell .ag-header-cell-label {
+            justify-content: flex-start !important;
+        }
+        div[data-testid="stDataEditor"] .ag-header-cell-text,
+        div[data-testid="stDataFrame"]  .ag-header-cell-text {
+            text-align: left !important;
+        }
+
+
         /* 셀 값 Bold(폴백) */
         div[data-testid="stDataEditor"] .ag-cell[col-id="상품명"],
         div[data-testid="stDataEditor"] .ag-cell[col-id="보유수량"],
