@@ -10,6 +10,21 @@ from collections import defaultdict
 
 import pandas as pd
 import streamlit as st
+
+
+# -------------------- URL fetch (Marketbom statement) --------------------
+try:
+    import requests  # pip install requests
+except Exception:
+    requests = None
+
+from urllib.parse import urljoin
+
+try:
+    from bs4 import BeautifulSoup  # pip install beautifulsoup4 (선택)
+except Exception:
+    BeautifulSoup = None
+
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -673,6 +688,215 @@ def make_pdf_bytes(df: pd.DataFrame, title: str) -> bytes:
 
 
 
+# -------------------- URL -> PDF/HTML data --------------------
+def _looks_like_pdf(content: bytes, ctype: str = "") -> bool:
+    if not content:
+        return False
+    if content[:4] == b"%PDF":
+        return True
+    return "application/pdf" in (ctype or "").lower()
+
+
+def _extract_candidate_links_from_html(html: str, base_url: str) -> list[str]:
+    """
+    HTML에서 PDF/엑셀 다운로드 링크 후보를 최대한 많이 뽑아냅니다.
+    (사이트 구조가 바뀌어도 어느 정도 버티도록 '넓게' 탐색)
+    """
+    cand: list[str] = []
+
+    # 1) a[href] 기반
+    if BeautifulSoup is not None:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = (a.get("href") or "").strip()
+                if not href:
+                    continue
+                full = urljoin(base_url, href)
+                cand.append(full)
+        except Exception:
+            pass
+
+    # 2) regex로 https://...pdf / .xlsx 등 추출 (script/json 포함)
+    for ext in ["pdf", "xls", "xlsx", "csv"]:
+        rx = re.compile(r'(https?://[^\s"\'<>]+?\.' + ext + r'(\?[^\s"\'<>]+)?)', re.IGNORECASE)
+        cand.extend([m.group(1) for m in rx.finditer(html or "")])
+
+    # 3) href="..." / src="..." 형태도 넓게
+    rx2 = re.compile(r'(?:href|src)\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+    for m in rx2.finditer(html or ""):
+        href = (m.group(1) or "").strip()
+        if href:
+            cand.append(urljoin(base_url, href))
+
+    # 우선순위: PDF가 먼저 오도록 정렬
+    def _score(u: str) -> int:
+        u2 = (u or "").lower()
+        s = 0
+        if ".pdf" in u2:
+            s += 100
+        if "pdf" in u2:
+            s += 30
+        if "download" in u2 or "다운" in u2:
+            s += 10
+        if ".xlsx" in u2 or ".xls" in u2:
+            s += 5
+        return -s  # 오름차순 정렬을 위해 음수
+
+    # 중복 제거 + 정렬
+    uniq = []
+    seen = set()
+    for u in cand:
+        if not u:
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        uniq.append(u)
+
+    uniq.sort(key=_score)
+    return uniq
+
+
+def _parse_items_from_html_tables(html: str) -> list[tuple[str, str, float]]:
+    """
+    거래명세서 HTML에 테이블이 있을 경우, pandas.read_html로 테이블을 뽑아
+    (제품명, 규격, 수량) 형태로 최대한 추정해 items로 변환합니다.
+    """
+    items: list[tuple[str, str, float]] = []
+    try:
+        tables = pd.read_html(html)
+    except Exception:
+        return items
+
+    def norm_col(c: str) -> str:
+        return re.sub(r"\s+", "", str(c or "").strip().lower())
+
+    name_keys = ["제품명", "상품명", "품명", "product", "item", "name"]
+    qty_keys = ["수량", "qty", "quantity", "갯수", "개수"]
+    spec_keys = ["규격", "단위", "옵션", "spec", "option", "size"]
+
+    for tb in tables:
+        dfh = tb.copy()
+        if dfh is None or len(dfh) == 0:
+            continue
+
+        cols = list(dfh.columns)
+        cols_norm = [norm_col(c) for c in cols]
+
+        def find_col(keys):
+            for k in keys:
+                k2 = norm_col(k)
+                for orig, nn in zip(cols, cols_norm):
+                    if k2 and k2 in nn:
+                        return orig
+            return None
+
+        name_col = find_col(name_keys)
+        qty_col = find_col(qty_keys)
+        spec_col = find_col(spec_keys)
+
+        # 이름/수량 컬럼이 없으면 스킵
+        if name_col is None or qty_col is None:
+            continue
+
+        for _, r in dfh.iterrows():
+            name = str(r.get(name_col, "")).strip()
+            if not name or name.lower() == "nan":
+                continue
+
+            spec = ""
+            if spec_col is not None:
+                spec = str(r.get(spec_col, "")).strip()
+                if spec.lower() == "nan":
+                    spec = ""
+
+            qraw = r.get(qty_col, 0)
+            try:
+                qty = float(pd.to_numeric(qraw, errors="coerce"))
+            except Exception:
+                try:
+                    qty = float(str(qraw).strip())
+                except Exception:
+                    qty = 0.0
+            if qty == 0 or (isinstance(qty, float) and math.isnan(qty)):
+                continue
+
+            items.append((name, spec, float(qty)))
+
+    return items
+
+
+def fetch_statement_from_url(url: str, timeout: int = 20) -> tuple[str, object, str]:
+    """
+    URL을 받아서 (kind, payload, final_url)을 반환합니다.
+    - kind == "pdf"   : payload = bytes (PDF)
+    - kind == "items" : payload = list[(제품명, 규격, 수량)]
+    """
+    if requests is None:
+        raise RuntimeError("URL 불러오기는 requests가 필요합니다. (pip install requests)")
+    url = (url or "").strip()
+    if not url.startswith("http"):
+        raise ValueError("URL을 정확히 입력해주세요. (https:// 로 시작)")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+    }
+
+    r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+    r.raise_for_status()
+
+    ctype = (r.headers.get("content-type") or "").lower()
+    content = r.content or b""
+    final_url = r.url
+
+    # 1) 바로 PDF가 내려오는 경우
+    if _looks_like_pdf(content, ctype):
+        return "pdf", content, final_url
+
+    # 2) HTML이면: (A) 테이블 파싱 시도 → (B) 다운로드 링크에서 PDF 찾기
+    is_html = ("text/html" in ctype) or (b"<html" in content[:300].lower()) or (content[:15].lower().startswith(b"<!doctype"))
+    if is_html:
+        html = content.decode(r.encoding or "utf-8", errors="ignore")
+
+        # A) HTML 테이블로부터 직접 items 추정
+        items = _parse_items_from_html_tables(html)
+        if items:
+            return "items", items, final_url
+
+        # B) PDF/엑셀 다운로드 링크 후보 찾기
+        cand_links = _extract_candidate_links_from_html(html, base_url=final_url)
+
+        # PDF가 우선
+        for link in cand_links[:50]:
+            try:
+                rr = requests.get(link, headers=headers, timeout=timeout, allow_redirects=True)
+                rr.raise_for_status()
+                ctype2 = (rr.headers.get("content-type") or "").lower()
+                b2 = rr.content or b""
+                if _looks_like_pdf(b2, ctype2):
+                    return "pdf", b2, rr.url
+            except Exception:
+                continue
+
+        raise RuntimeError("페이지에서 PDF/테이블 데이터를 찾지 못했습니다. (로그인/권한/다운로드 링크 구조 확인 필요)")
+
+    # 3) 기타(JSON 등)에서 PDF URL 패턴이 있을 수도 있어 regex로 한 번 더 시도
+    try:
+        txt = content.decode("utf-8", errors="ignore")
+        m = re.search(r'(https?://[^\s"\'<>]+?\.pdf(\?[^\s"\'<>]+)?)', txt, re.IGNORECASE)
+        if m:
+            link = m.group(1)
+            rr = requests.get(link, headers=headers, timeout=timeout, allow_redirects=True)
+            rr.raise_for_status()
+            if _looks_like_pdf(rr.content or b"", (rr.headers.get("content-type") or "")):
+                return "pdf", rr.content, rr.url
+    except Exception:
+        pass
+
+    raise RuntimeError(f"지원되지 않는 응답 형식입니다. (content-type={ctype})")
+
+
 # -------------------- Streamlit UI --------------------
 st.set_page_config(
     page_title="재고프로그램",
@@ -1269,13 +1493,60 @@ def render_pdf_page():
 
     pack_rules, box_rules, ea_rules = parse_rules(st.session_state["rules_text"])
 
+    # -------------------- 🔗 URL로 불러오기(선택) --------------------
+    st.markdown("#### 🔗 URL에서 불러오기 (선택)")
+    url_col1, url_col2 = st.columns([3, 1])
+    with url_col1:
+        stmt_url = st.text_input(
+            "거래명세서 URL",
+            key="stmt_url_input",
+            placeholder="https://wholesalesales.marketbom.com/statement/...",
+        )
+    with url_col2:
+        if st.button("불러오기", use_container_width=True, key="stmt_url_load_btn"):
+            try:
+                kind, payload, final_url = fetch_statement_from_url(stmt_url)
+                st.session_state["stmt_url_kind"] = kind
+                st.session_state["stmt_url_payload"] = payload
+                st.session_state["stmt_url_final"] = final_url
+                st.session_state["stmt_url_loaded_at"] = now_prefix_kst()
+                st.success("URL 불러오기 완료!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"URL 불러오기 실패: {e}")
+
+    clear_col1, clear_col2 = st.columns([3, 1])
+    with clear_col2:
+        if st.button("URL 초기화", use_container_width=True, key="stmt_url_clear_btn"):
+            for k in ["stmt_url_kind", "stmt_url_payload", "stmt_url_final", "stmt_url_loaded_at"]:
+                st.session_state.pop(k, None)
+            st.success("URL 데이터 초기화 완료!")
+            st.rerun()
+
     uploaded = st.file_uploader("📎 PDF 업로드", type=["pdf"])
 
+    # 우선순위: 업로드 PDF > URL에서 불러온 데이터(거래명세서)
+    use_kind = None
+    file_bytes = None
+    file_name = None
+
     if uploaded:
+        use_kind = "pdf"
         file_bytes = uploaded.getvalue()
+        file_name = file_name
+
+    elif st.session_state.get("stmt_url_kind") == "pdf":
+        use_kind = "pdf"
+        file_bytes = st.session_state.get("stmt_url_payload")
+        file_name = f"statement_url_{st.session_state.get('stmt_url_loaded_at', now_prefix_kst())}.pdf"
+
+    elif st.session_state.get("stmt_url_kind") == "items":
+        use_kind = "items"
+
+    if use_kind == "pdf":
 
         # ✅ "다운로드 시각"으로 고정되는 prefix (PDF 업로드가 바뀌면 새로 생성)
-        file_sig = (uploaded.name, len(file_bytes))
+        file_sig = (file_name, len(file_bytes))
         if st.session_state.get("dl_sig") != file_sig:
             st.session_state["dl_sig"] = file_sig
             st.session_state["dl_prefix"] = now_prefix_kst()
@@ -1404,6 +1675,122 @@ def render_pdf_page():
                     st.info("📦 사이드바의 '재고관리'로 이동하면 확인할 수 있어요.")
 
             # PIL 없으면 여러 페이지 합치기 불가 안내
+            if Image is None and len(sum_imgs) > 1:
+                st.warning("⚠️ Pillow(PIL)가 없어 제품별합계 스크린샷은 1페이지만 PNG로 저장됩니다. 전체를 1장으로 합치려면 Pillow 설치가 필요합니다.")
+
+        except Exception as e:
+            st.error(f"제품별 합계 PDF/PNG 생성 실패: {e} (fonts/NanumGothic.ttf 또는 pymupdf 확인)")
+
+    elif use_kind == "items":
+        # URL에서 테이블 데이터를 직접 읽어온 경우(원본 PDF 없음)
+        items_raw = st.session_state.get("stmt_url_payload") or []
+        # (제품명 셀에 규격이 같이 붙어오는 케이스 대비)
+        items = []
+        for name, spec, qty in items_raw:
+            name = str(name or "").strip()
+            spec = str(spec or "").strip()
+            if not name:
+                continue
+            toks = name.split()
+            product = toks[0]
+            spec2 = spec if spec else " ".join(toks[1:])
+            try:
+                q = float(qty)
+            except Exception:
+                q = 0.0
+            if q == 0 or (isinstance(q, float) and math.isnan(q)):
+                continue
+            items.append((product, spec2, q))
+
+        # ✅ "다운로드 시각" prefix (URL 로딩 시각 기준)
+        fixed_prefix = st.session_state.get("stmt_url_loaded_at") or now_prefix_kst()
+
+        # ---- 제품별 합계(HTML items 기반) ----
+        agg = aggregate(items)
+
+        rows = []
+        fixed_set = set(FIXED_PRODUCT_ORDER)
+
+        for product in FIXED_PRODUCT_ORDER:
+            if product in agg:
+                total_str = format_total_custom(
+                    product, agg[product],
+                    pack_rules, box_rules, ea_rules,
+                    allow_decimal_pack=allow_decimal_pack,
+                    allow_decimal_box=allow_decimal_box
+                )
+            else:
+                total_str = "0"
+            rows.append({"제품명": product, "합계": total_str})
+
+        rest = [p for p in agg.keys() if p not in fixed_set]
+        for product in sorted(rest):
+            rows.append({
+                "제품명": product,
+                "합계": format_total_custom(
+                    product, agg[product],
+                    pack_rules, box_rules, ea_rules,
+                    allow_decimal_pack=allow_decimal_pack,
+                    allow_decimal_box=allow_decimal_box
+                ),
+            })
+
+        df_long = pd.DataFrame(rows)
+        st.session_state["last_sum_df_long"] = df_long.copy()
+
+        df_wide = to_3_per_row(df_long, 3)
+
+        st.subheader("🧾 제품별 합계")
+        st.dataframe(df_wide, use_container_width=True, hide_index=True)
+
+        # ✅ 버튼 3개: PDF / 스크린샷(PNG 1장) / 재고등록
+        try:
+            pdf_bytes = make_pdf_bytes(df_wide, "제품별 합계")
+            sum_imgs = render_pdf_pages_to_images(pdf_bytes, zoom=3.0)
+            sum_png_one = merge_png_pages_to_one(sum_imgs)
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.download_button(
+                    "📄 PDF 다운로드(제품별합계)",
+                    data=pdf_bytes,
+                    file_name="제품별_합계.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with c2:
+                st.download_button(
+                    "🖼️ 스크린샷(PNG) 다운로드",
+                    data=sum_png_one,
+                    file_name=f"{fixed_prefix}_제품별합계.png",
+                    mime="image/png",
+                    use_container_width=True,
+                )
+            with c3:
+                if st.button("📝 재고등록", use_container_width=True):
+                    st.session_state["show_register_panel"] = True
+
+            if st.session_state.get("show_register_panel"):
+                st.markdown("#### 📝 재고등록 (1차/2차/3차)")
+                target = st.radio("등록할 차수", ["1차", "2차", "3차"], horizontal=True, key="register_target")
+                add_mode = st.checkbox("기존 값에 누적(더하기)", value=False, key="register_add_mode")
+
+                colR1, colR2 = st.columns([1, 3])
+                with colR1:
+                    do_reg = st.button("✅ 등록", use_container_width=True, key="do_register_btn")
+                with colR2:
+                    st.caption("※ 재고관리 표에 **이미 존재하는 상품명만** 등록됩니다. (없는 상품은 제외)")
+
+                if do_reg:
+                    sum_df = st.session_state.get("last_sum_df_long")
+                    updated, skipped = register_sum_to_inventory(sum_df, target_col=target, add_mode=add_mode)
+                    st.session_state["show_register_panel"] = False
+
+                    if skipped:
+                        st.warning("등록 제외(재고관리 상품명 없음): " + ", ".join(sorted(set(skipped))))
+                    st.success(f"{target}에 등록 완료! (반영 행: {updated})")
+                    st.info("📦 사이드바의 '재고관리'로 이동하면 확인할 수 있어요.")
+
             if Image is None and len(sum_imgs) > 1:
                 st.warning("⚠️ Pillow(PIL)가 없어 제품별합계 스크린샷은 1페이지만 PNG로 저장됩니다. 전체를 1장으로 합치려면 Pillow 설치가 필요합니다.")
 
