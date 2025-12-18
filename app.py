@@ -904,7 +904,6 @@ def render_inventory_page():
 
     # ---- 📁 내보내기 폴더(재고관리에서만 표시) ----
     with st.sidebar:
-        st.divider()
         with st.expander("📁 내보내기 폴더", expanded=False):
             dates = list_export_dates()
             if not dates:
