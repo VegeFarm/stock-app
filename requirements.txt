@@ -9,5 +9,8 @@ streamlit-aggrid
 requests
 beautifulsoup4
 lxml
+pytesseract
+pillow
+
 
 
