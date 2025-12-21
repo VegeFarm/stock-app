@@ -729,8 +729,7 @@ def mapping_list_from_df(edited: pd.DataFrame) -> List[Dict]:
 
 # -------------------- Backups (Excel) --------------------
 def backup_rules_to_excel(mapping_rules: List[Dict], expr_rules: Dict) -> Path:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = BACKUP_DIR / f"상품별매칭규칙_백업_{ts}.xlsx"
+    out_path = BACKUP_DIR / "상품별매칭규칙_백업.xlsx"
 
     df_map = mapping_df_from_list(mapping_rules).rename(
         columns={
