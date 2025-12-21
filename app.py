@@ -2278,7 +2278,7 @@ def render_excel_results_page():
     st.download_button(
         "⬇️ 제품별 개수 PDF 다운로드",
         data=build_summary_pdf(summary),
-        file_name=f"제품별개수_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+        file_name="제품별개수.pdf",
         mime="application/pdf",
         use_container_width=True,
     )
@@ -2305,7 +2305,7 @@ def render_excel_results_page():
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
         data=build_sticker_pdf(sticker_texts),
-        file_name=f"스티커용지_65칸_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+        file_name="스티커용지.pdf",
         mime="application/pdf",
         use_container_width=True,
     )
