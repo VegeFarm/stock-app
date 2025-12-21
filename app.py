@@ -2066,7 +2066,7 @@ def render_mapping_rules_page():
 
     if not st.session_state["mapping_authed"]:
         st.title("🔒 상품명 매칭 규칙")
-        st.caption("이 메뉴는 비밀번호가 필요합니다. (비밀번호: 1390)")
+        st.caption("이 메뉴는 비밀번호가 필요합니다.")
         with st.form("mapping_pw_form"):
             pw = st.text_input("비밀번호", type="password")
             ok = st.form_submit_button("입장", use_container_width=True)
