@@ -2349,63 +2349,56 @@ def render_excel_results_page():
     saved_in_options = [p for p in saved_all if p in product_options]
     saved_outside = [p for p in saved_all if p not in product_options]
 
-    with st.expander("🚫 스티커로 출력하지 않을 상품 설정", expanded=False):
-        st.caption("선택한 상품은 스티커용지 PDF 생성에서 제외됩니다. 변경사항은 저장 후 적용됩니다. (저장하면 다음 실행/다른 파일에도 동일 적용)")
+    # 기본은 "저장된 제외목록"만 이번 생성에 적용 (저장 전 편집값은 적용되지 않음)
+    desired_editor = [p for p in saved_in_options if p in product_options]
 
-        selected = st.multiselect(
+    if "sticker_exclude_products_editor" not in st.session_state:
+        st.session_state["sticker_exclude_products_editor"] = desired_editor
+    else:
+        # 업로드 파일이 바뀌어 옵션 목록이 달라져도 오류가 나지 않게, 현재 옵션에 없는 값은 제거
+        st.session_state["sticker_exclude_products_editor"] = [
+            p for p in (st.session_state.get("sticker_exclude_products_editor") or [])
+            if p in product_options
+        ]
+
+    if "sticker_exclude_products_extra" not in st.session_state:
+        st.session_state["sticker_exclude_products_extra"] = ",".join(saved_outside)
+
+    with st.expander("🚫 스티커로 출력하지 않을 상품 설정", expanded=False):
+        st.caption("선택한 상품은 스티커용지 PDF 생성에서 제외됩니다. (저장하면 다음 실행/다른 파일에도 동일 적용)")
+
+        st.multiselect(
             "제외할 상품 (현재 업로드한 파일에 존재하는 상품)",
             options=product_options,
-            default=[p for p in saved_in_options if p in product_options],
             key="sticker_exclude_products_editor",
         )
 
-        extra_text = st.text_input(
+        st.text_input(
             "추가 제외 (옵션에 없는 상품 · 쉼표로 여러개 입력 · 정확히 일치)",
-            value=",".join(saved_outside),
             key="sticker_exclude_products_extra",
             placeholder="예: 고수,딜",
         )
-        extra = [normalize_text(x) for x in (extra_text or "").split(",") if normalize_text(x)]
 
-        # 선택값(초안) — 저장 버튼을 눌러야 적용됩니다.
-        draft = []
-        seen = set()
-        for p2 in (selected + extra):
-            if p2 and p2 not in seen:
-                draft.append(p2)
-                seen.add(p2)
+        if st.button("💾 제외목록 저장", use_container_width=True):
+            _selected = st.session_state.get("sticker_exclude_products_editor", []) or []
+            _extra_text = st.session_state.get("sticker_exclude_products_extra", "") or ""
+            _extra = [normalize_text(x) for x in _extra_text.split(",") if normalize_text(x)]
 
+            _merged = []
+            _seen = set()
+            for _p in (_selected + _extra):
+                if _p and _p not in _seen:
+                    _merged.append(_p)
+                    _seen.add(_p)
 
-        # 버튼 콜백에서 사용할 수 있게 초안 보관
-        st.session_state["_sticker_exclude_draft"] = draft
+            save_sticker_exclude(_merged)
+            st.session_state["sticker_exclude_products"] = _merged
+            st.success("저장되었습니다. 다음 실행에도 그대로 적용됩니다.")
 
-        def _sticker_exclude_save() -> None:
-            draft2 = st.session_state.get("_sticker_exclude_draft", []) or []
-            save_sticker_exclude(draft2)
-            st.session_state["sticker_exclude_products"] = draft2
-            st.session_state["_sticker_exclude_flash"] = "saved"
-
-        def _sticker_exclude_reset() -> None:
-            save_sticker_exclude([])
-            st.session_state["sticker_exclude_products"] = []
-            # 위젯 값은 콜백(on_click) 안에서만 안전하게 초기화할 수 있습니다.
-            st.session_state["sticker_exclude_products_editor"] = []
-            st.session_state["sticker_exclude_products_extra"] = ""
-            st.session_state["_sticker_exclude_flash"] = "reset"
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.button("💾 제외목록 저장", use_container_width=True, on_click=_sticker_exclude_save)
-        with c2:
-            st.button("🧹 제외목록 초기화", use_container_width=True, on_click=_sticker_exclude_reset)
-
-        flash = st.session_state.pop("_sticker_exclude_flash", None)
-        if flash == "saved":
-            st.success("저장되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
-        elif flash == "reset":
-            st.success("초기화되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
-
-        st.write("현재 저장된 값:", (", ".join(st.session_state.get("sticker_exclude_products", []) or []) or "없음"))
+        st.write(
+            "현재 저장된 값:",
+            (", ".join(st.session_state.get("sticker_exclude_products", []) or []) or "없음"),
+        )
 
     exclude_set = set(st.session_state.get("sticker_exclude_products", []) or [])
 
