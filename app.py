@@ -1411,7 +1411,7 @@ def _norm_header(s: str) -> str:
     return s.strip().lower()
 
 
-def build_tc_excel_bytes(template_bytes: bytes, rows: List[Dict[str, str]]) -> bytes:
+def build_tc_excel_bytes(template_bytes: bytes, rows: List[Dict[str, str]], page_mark: str | None = None) -> bytes:
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
     if "양식" not in wb.sheetnames:
         raise ValueError("TC 템플릿에 '양식' 시트가 없습니다.")
@@ -1452,6 +1452,20 @@ def build_tc_excel_bytes(template_bytes: bytes, rows: List[Dict[str, str]]) -> b
         ws.cell(rr, c_prod).value = r.get("상품명", "")
         ws.cell(rr, c_type).value = r.get("배송유형", "")
         # 배송받을장소는 건드리지 않음
+
+    # ✅ 각 페이지 상단에 마킹 문자(S/N 등) 표시 (16pt)
+    if page_mark:
+        mark = str(page_mark).strip().upper()
+        if mark:
+            mark = mark[0]
+            header_txt = f"&16{mark}"
+            try:
+                ws.oddHeader.center.text = header_txt
+                ws.evenHeader.center.text = header_txt
+                ws.firstHeader.center.text = header_txt
+            except Exception:
+                # 일부 템플릿/버전에서 header 접근이 실패할 수 있음 -> 무시
+                pass
 
     out = io.BytesIO()
     wb.save(out)
@@ -2452,7 +2466,7 @@ def render_excel_results_page():
         with cols[0]:
             st.write(f"새벽배송 행: {len(dawn_df)} (배송유형: {st.session_state.tc_type_dawn})")
             if len(dawn_df):
-                out_bytes = build_tc_excel_bytes(template_bytes, make_tc_rows(dawn_df, "새벽배송"))
+                out_bytes = build_tc_excel_bytes(template_bytes, make_tc_rows(dawn_df, "새벽배송"), page_mark="S")
                 st.download_button(
                     "⬇️ TC주문_등록양식(새벽배송) 엑셀 다운로드",
                     data=out_bytes,
@@ -2464,7 +2478,7 @@ def render_excel_results_page():
         with cols[1]:
             st.write(f"익일배송 행: {len(next_df)} (배송유형: {st.session_state.tc_type_next})")
             if len(next_df):
-                out_bytes = build_tc_excel_bytes(template_bytes, make_tc_rows(next_df, "익일배송"))
+                out_bytes = build_tc_excel_bytes(template_bytes, make_tc_rows(next_df, "익일배송"), page_mark="N")
                 st.download_button(
                     "⬇️ TC주문_등록양식(익일배송) 엑셀 다운로드",
                     data=out_bytes,
