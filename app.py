@@ -2261,8 +2261,6 @@ def render_excel_results_page():
     st.markdown("---")
     st.subheader("🏷️ 스티커용지 PDF")
 
-    st.caption("A4 / 65칸 / 38.2×21.1mm")
-
     label_rows = []
     for _, r in summary.iterrows():
         name = str(r["제품명"]).strip()
@@ -2277,7 +2275,7 @@ def render_excel_results_page():
     for label, qty in label_rows:
         sticker_texts.extend([label] * qty)
 
-    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt")
+    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 65칸 · 38.2×21.1mm")
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
         data=build_sticker_pdf(sticker_texts),
@@ -2352,7 +2350,7 @@ def render_excel_results_page():
         st.download_button(
             "⬇️ 새벽배송 수취인별 PDF",
             data=build_recipient_pdf(dawn_entries),
-            file_name="새벼배송.pdf",
+            file_name="새벽배송.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
