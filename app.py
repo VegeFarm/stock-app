@@ -2393,7 +2393,7 @@ def render_excel_results_page():
 
     # TC 주문 등록
     st.markdown("---")
-    st.subheader("🧾 TC주문_등록양식 자동작성 (새벽/익일 각각 엑셀 생성)")
+    st.subheader("🧾 TC주문_등록양식 (새벽/익일)")
 
     if not TC_TEMPLATE_DEFAULT_PATH.exists():
         st.error("앱 폴더에 'TC주문_등록양식.xlsx' 파일이 없습니다. GitHub에 app.py와 같이 올려주세요.")
