@@ -2044,14 +2044,14 @@ with st.sidebar:
     if st.button("⬆️ 엑셀 업로드 & 결과", use_container_width=True):
         st.session_state["page"] = "excel_results"
         st.rerun()
+    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
+        st.session_state["page"] = "mapping_rules"
+        st.rerun()
     if st.button("🧾 제품별 합계", use_container_width=True):
         st.session_state["page"] = "product_totals"
         st.rerun()
     if st.button("📦 재고관리", use_container_width=True):
         st.session_state["page"] = "inventory"
-        st.rerun()
-    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
-        st.session_state["page"] = "mapping_rules"
         st.rerun()
     st.divider()
 
@@ -2241,7 +2241,7 @@ def render_excel_results_page():
     st.session_state["excel_default_unit"] = default_unit
 
     # -------------------- Results --------------------
-    with st.expander("✅ 결과 (제품명 / 구분 / 수량)", expanded=True):
+    with st.expander("✅ 결과 (제품명 / 구분 / 수량)", expanded=False):
         st.dataframe(summary, use_container_width=True, height=520)
 
     with st.expander("⚠️ 미매칭/누락 행 (규칙 추가용)", expanded=False):
@@ -2259,7 +2259,9 @@ def render_excel_results_page():
 
     # 스티커 PDF
     st.markdown("---")
-    st.subheader("🏷️ 스티커용지 PDF (A4 / 65칸 / 38.2×21.1mm)")
+    st.subheader("🏷️ 스티커용지 PDF")
+
+    st.caption("A4 / 65칸 / 38.2×21.1mm")
 
     label_rows = []
     for _, r in summary.iterrows():
@@ -2350,7 +2352,7 @@ def render_excel_results_page():
         st.download_button(
             "⬇️ 새벽배송 수취인별 PDF",
             data=build_recipient_pdf(dawn_entries),
-            file_name=f"수취인별_새벽배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+            file_name="새벼배송.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
@@ -2360,7 +2362,7 @@ def render_excel_results_page():
         st.download_button(
             "⬇️ 익일배송 수취인별 PDF",
             data=build_recipient_pdf(next_entries),
-            file_name=f"수취인별_익일배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+            file_name="익일배송.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
@@ -2430,7 +2432,7 @@ def render_excel_results_page():
                 st.download_button(
                     "⬇️ TC주문_등록양식(새벽배송) 엑셀 다운로드",
                     data=out_bytes,
-                    file_name=f"TC주문_등록양식_새벽배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+                    file_name="새벽배송_송장.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
@@ -2442,7 +2444,7 @@ def render_excel_results_page():
                 st.download_button(
                     "⬇️ TC주문_등록양식(익일배송) 엑셀 다운로드",
                     data=out_bytes,
-                    file_name=f"TC주문_등록양식_익일배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+                    file_name="익일배송_송장.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
