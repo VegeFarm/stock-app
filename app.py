@@ -2287,12 +2287,60 @@ def render_excel_results_page():
     st.markdown("---")
     st.subheader("🏷️ 스티커용지 PDF")
 
+    # ✅ 스티커로 출력하지 않을 상품 설정 (펼쳐보기)
+    if "sticker_exclude_products" not in st.session_state:
+        st.session_state["sticker_exclude_products"] = []
+
+    product_options = sorted(
+        [p for p in summary["제품명"].dropna().astype(str).str.strip().unique().tolist() if p]
+    )
+
+    with st.expander("🚫 스티커로 출력하지 않을 상품 설정", expanded=False):
+        st.caption("선택한 상품은 스티커용지 PDF 생성에서 제외됩니다.")
+        selected = st.multiselect(
+            "제외할 상품",
+            options=product_options,
+            default=[p for p in st.session_state.get("sticker_exclude_products", []) if p in product_options],
+            key="sticker_exclude_products_editor",
+        )
+        extra_text = st.text_input(
+            "추가 제외(쉼표로 여러개 입력 · 정확히 일치)",
+            value="",
+            key="sticker_exclude_products_extra",
+            placeholder="예: 고수,딜",
+        )
+        extra = [normalize_text(x) for x in (extra_text or "").split(",") if normalize_text(x)]
+
+        merged = []
+        seen = set()
+        for p2 in (selected + extra):
+            if p2 and p2 not in seen:
+                merged.append(p2)
+                seen.add(p2)
+
+        st.session_state["sticker_exclude_products"] = merged
+
+        if merged:
+            st.write("현재 제외:", ", ".join(merged))
+        else:
+            st.write("현재 제외: 없음")
+
+    exclude_set = set(st.session_state.get("sticker_exclude_products", []) or [])
+    excluded_stickers = 0
+
     label_rows = []
     for _, r in summary.iterrows():
         name = str(r["제품명"]).strip()
+        qty = _as_int_qty(r["수량"])
+
+        # 제외 상품은 스티커 생성에서 제외
+        if name in exclude_set:
+            if qty > 0:
+                excluded_stickers += qty
+            continue
+
         var = str(r["구분"]).strip()
         label = name if var in ("", "-", "nan", "None") else f"{name}{var}"
-        qty = _as_int_qty(r["수량"])
         if qty > 0:
             label_rows.append((label, qty))
     label_rows.sort(key=lambda x: x[0])
@@ -2301,7 +2349,7 @@ def render_excel_results_page():
     for label, qty in label_rows:
         sticker_texts.extend([label] * qty)
 
-    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm")
+    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm (제외 {excluded_stickers}개)")
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
         data=build_sticker_pdf(sticker_texts),
