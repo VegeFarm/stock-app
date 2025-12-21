@@ -2275,7 +2275,7 @@ def render_excel_results_page():
     for label, qty in label_rows:
         sticker_texts.extend([label] * qty)
 
-    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 65칸 · 38.2×21.1mm")
+    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm")
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
         data=build_sticker_pdf(sticker_texts),
