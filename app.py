@@ -2044,14 +2044,14 @@ with st.sidebar:
     if st.button("⬆️ 엑셀 업로드 & 결과", use_container_width=True):
         st.session_state["page"] = "excel_results"
         st.rerun()
-    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
-        st.session_state["page"] = "mapping_rules"
-        st.rerun()
     if st.button("🧾 제품별 합계", use_container_width=True):
         st.session_state["page"] = "product_totals"
         st.rerun()
     if st.button("📦 재고관리", use_container_width=True):
         st.session_state["page"] = "inventory"
+        st.rerun()
+    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
+        st.session_state["page"] = "mapping_rules"
         st.rerun()
     st.divider()
 
@@ -2060,7 +2060,31 @@ with st.sidebar:
 # Pages
 # =====================================================
 def render_mapping_rules_page():
+    # 🔒 비밀번호 보호 (상품명 매칭 규칙)
+    if "mapping_authed" not in st.session_state:
+        st.session_state["mapping_authed"] = False
+
+    if not st.session_state["mapping_authed"]:
+        st.title("🔒 상품명 매칭 규칙")
+        st.caption("이 메뉴는 비밀번호가 필요합니다. (비밀번호: 1390)")
+        with st.form("mapping_pw_form"):
+            pw = st.text_input("비밀번호", type="password")
+            ok = st.form_submit_button("입장", use_container_width=True)
+        if ok:
+            if (pw or "").strip() == "1390":
+                st.session_state["mapping_authed"] = True
+                st.success("인증 완료!")
+                st.rerun()
+            else:
+                st.error("비밀번호가 올바르지 않습니다.")
+        return
+
     st.title("🧩 상품명 매칭 규칙")
+    if st.button("🔓 잠금 해제(로그아웃)", use_container_width=False, key="mapping_logout_btn"):
+        st.session_state["mapping_authed"] = False
+        st.success("잠금 상태로 전환되었습니다.")
+        st.rerun()
+
     st.caption("엑셀의 실제 상품명 → 표시될 상품명으로 매핑하고, 합산규칙(N)도 설정합니다.")
 
     sidebar_backup_folder()
