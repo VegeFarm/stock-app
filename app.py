@@ -2482,8 +2482,8 @@ def render_product_totals_page():
     default_unit = st.session_state.get("excel_default_unit", "개")
 
     if summary_df is None or len(summary_df) == 0:
-        st.info("먼저 [⬆️ 엑셀 업로드 & 결과] 페이지에서 엑셀을 업로드해 주세요.")
-        if st.button("⬆️ 엑셀 업로드 & 결과로 이동", use_container_width=True):
+        st.info("먼저 [📥 엑셀 업로드 & 결과] 페이지에서 엑셀을 업로드해 주세요.")
+        if st.button("📥 엑셀 업로드 & 결과로 이동", use_container_width=True):
             st.session_state["page"] = "excel_results"
             st.rerun()
         return
