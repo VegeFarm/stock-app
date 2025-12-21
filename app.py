@@ -2563,7 +2563,7 @@ def render_product_totals_page():
             st.download_button(
                 "📄 PDF 다운로드(제품별합계)",
                 data=pdf_bytes,
-                file_name="제품별_합계.pdf",
+                file_name="제품별합계.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
@@ -2571,7 +2571,7 @@ def render_product_totals_page():
             st.download_button(
                 "🖼️ 스크린샷(PNG) 다운로드",
                 data=sum_png_one,
-                file_name=f"{now_prefix_kst()}_제품별합계.png",
+                file_name="제품별합계(스크린샷).png",
                 mime="image/png",
                 use_container_width=True,
             )
