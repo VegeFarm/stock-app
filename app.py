@@ -2044,14 +2044,14 @@ with st.sidebar:
     if st.button("⬆️ 엑셀 업로드 & 결과", use_container_width=True):
         st.session_state["page"] = "excel_results"
         st.rerun()
-    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
-        st.session_state["page"] = "mapping_rules"
-        st.rerun()
     if st.button("🧾 제품별 합계", use_container_width=True):
         st.session_state["page"] = "product_totals"
         st.rerun()
     if st.button("📦 재고관리", use_container_width=True):
         st.session_state["page"] = "inventory"
+        st.rerun()
+    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
+        st.session_state["page"] = "mapping_rules"
         st.rerun()
     st.divider()
 
