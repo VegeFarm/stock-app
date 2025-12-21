@@ -2043,7 +2043,7 @@ if "page" not in st.session_state:
 
 with st.sidebar:
     st.markdown("## 📌 메뉴")
-    if st.button("📥 엑셀 업로드 & 결과", use_container_width=True):
+    if st.button("📥 엑셀 업로드", use_container_width=True):
         st.session_state["page"] = "excel_results"
         st.rerun()
     if st.button("🧾 제품별 합계", use_container_width=True):
