@@ -2153,7 +2153,7 @@ def render_excel_results_page():
     if "tc_type_next" not in st.session_state:
         st.session_state.tc_type_next = tc_saved["next"]
 
-    with st.sidebar.expander("🧾 TC주문_등록 설정", expanded=False):
+    with st.sidebar.expander("🔧 배송방법 설정", expanded=False):
         st.caption("변경 후 [저장]을 누르면 다음 실행에도 그대로 유지됩니다.")
 
         dawn_val = st.text_input(
