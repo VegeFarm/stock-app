@@ -461,8 +461,11 @@ STICKER_ROWS = 13
 STICKER_PER_PAGE = STICKER_COLS * STICKER_ROWS  # 65
 STICKER_CELL_W_MM = 38.2
 STICKER_CELL_H_MM = 21.1
-STICKER_FONT_SIZE = 11
-STICKER_LEADING = 13
+STICKER_FONT_SIZE = 13
+STICKER_LEADING = 16
+# 프린터 출력 보정(살짝 오른쪽/위로 이동)
+STICKER_OFFSET_X_MM = 1.0  # mm
+STICKER_OFFSET_Y_MM = 1.0  # mm
 
 
 def _clean_access_message(msg: str) -> str:
@@ -1355,8 +1358,8 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
     grid_w_pt = cell_w_pt * STICKER_COLS
     grid_h_pt = cell_h_pt * STICKER_ROWS
 
-    x0 = (page_w_pt - grid_w_pt) / 2.0
-    y0 = (page_h_pt - grid_h_pt) / 2.0
+    x0 = (page_w_pt - grid_w_pt) / 2.0 + (STICKER_OFFSET_X_MM * mm)
+    y0 = (page_h_pt - grid_h_pt) / 2.0 + (STICKER_OFFSET_Y_MM * mm)
 
     total = len(label_texts)
     page_count = (total + STICKER_PER_PAGE - 1) // STICKER_PER_PAGE if total else 1
