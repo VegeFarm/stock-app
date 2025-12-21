@@ -2349,11 +2349,8 @@ def render_excel_results_page():
     saved_in_options = [p for p in saved_all if p in product_options]
     saved_outside = [p for p in saved_all if p not in product_options]
 
-    # 기본은 "저장된 값"을 그대로 이번 생성에도 적용
-    merged = list(saved_all)
-
     with st.expander("🚫 스티커로 출력하지 않을 상품 설정", expanded=False):
-        st.caption("선택한 상품은 스티커용지 PDF 생성에서 제외됩니다. (저장하면 다음 실행/다른 파일에도 동일 적용)")
+        st.caption("선택한 상품은 스티커용지 PDF 생성에서 제외됩니다. 변경사항은 저장 후 적용됩니다. (저장하면 다음 실행/다른 파일에도 동일 적용)")
 
         selected = st.multiselect(
             "제외할 상품 (현재 업로드한 파일에 존재하는 상품)",
@@ -2370,33 +2367,33 @@ def render_excel_results_page():
         )
         extra = [normalize_text(x) for x in (extra_text or "").split(",") if normalize_text(x)]
 
-        # 이번 생성에 적용될 '미리보기' 목록 (저장 전에도 현재 화면 기준으로 적용)
-        merged = []
+        # 선택값(초안) — 저장 버튼을 눌러야 적용됩니다.
+        draft = []
         seen = set()
         for p2 in (selected + extra):
             if p2 and p2 not in seen:
-                merged.append(p2)
+                draft.append(p2)
                 seen.add(p2)
 
         c1, c2 = st.columns(2)
         with c1:
             if st.button("💾 제외목록 저장", use_container_width=True):
-                save_sticker_exclude(merged)
-                st.session_state["sticker_exclude_products"] = merged
-                st.success("저장되었습니다. 다음 실행에도 그대로 적용됩니다.")
+                save_sticker_exclude(draft)
+                st.session_state["sticker_exclude_products"] = draft
+                st.success("저장되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
+                st.rerun()
         with c2:
             if st.button("🧹 제외목록 초기화", use_container_width=True):
                 save_sticker_exclude([])
                 st.session_state["sticker_exclude_products"] = []
                 st.session_state["sticker_exclude_products_editor"] = []
                 st.session_state["sticker_exclude_products_extra"] = ""
-                merged = []
-                st.success("초기화되었습니다.")
+                st.success("초기화되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
+                st.rerun()
 
-        st.write("이번 생성에 적용(미리보기):", (", ".join(merged) if merged else "없음"))
         st.write("현재 저장된 값:", (", ".join(st.session_state.get("sticker_exclude_products", []) or []) or "없음"))
 
-    exclude_set = set(merged or [])
+    exclude_set = set(st.session_state.get("sticker_exclude_products", []) or [])
 
     excluded_stickers = 0
 
