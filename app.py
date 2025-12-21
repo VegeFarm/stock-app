@@ -810,7 +810,7 @@ def sidebar_expression_rules():
     units = expr.get("units", [])
     default_unit = normalize_text(expr.get("default_unit", "개")) or "개"
 
-    with st.sidebar.expander("🧩 표현규칙", expanded=False):
+    with st.sidebar.expander("⚙️ 표현규칙", expanded=False):
         st.caption("합산규칙(N)을 적용할 단위를 관리합니다. (통/개/팩/봉 등)")
 
         df = pd.DataFrame(units)
@@ -2040,7 +2040,7 @@ if "page" not in st.session_state:
 
 with st.sidebar:
     st.markdown("## 📌 메뉴")
-    if st.button("⬆️ 엑셀 업로드 & 결과", use_container_width=True):
+    if st.button("📥 엑셀 업로드 & 결과", use_container_width=True):
         st.session_state["page"] = "excel_results"
         st.rerun()
     if st.button("🧾 제품별 합계", use_container_width=True):
@@ -2138,7 +2138,7 @@ def render_mapping_rules_page():
 
 
 def render_excel_results_page():
-    st.title("⬆️ 엑셀 업로드 & 결과")
+    st.title("📥 엑셀 업로드 & 결과")
     st.caption("엑셀 업로드 → 제품별 집계 + 수취인별 PDF + 스티커용지 PDF + TC주문_등록양식 자동작성")
     st.markdown("---")
 
