@@ -2375,21 +2375,35 @@ def render_excel_results_page():
                 draft.append(p2)
                 seen.add(p2)
 
+
+        # 버튼 콜백에서 사용할 수 있게 초안 보관
+        st.session_state["_sticker_exclude_draft"] = draft
+
+        def _sticker_exclude_save() -> None:
+            draft2 = st.session_state.get("_sticker_exclude_draft", []) or []
+            save_sticker_exclude(draft2)
+            st.session_state["sticker_exclude_products"] = draft2
+            st.session_state["_sticker_exclude_flash"] = "saved"
+
+        def _sticker_exclude_reset() -> None:
+            save_sticker_exclude([])
+            st.session_state["sticker_exclude_products"] = []
+            # 위젯 값은 콜백(on_click) 안에서만 안전하게 초기화할 수 있습니다.
+            st.session_state["sticker_exclude_products_editor"] = []
+            st.session_state["sticker_exclude_products_extra"] = ""
+            st.session_state["_sticker_exclude_flash"] = "reset"
+
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("💾 제외목록 저장", use_container_width=True):
-                save_sticker_exclude(draft)
-                st.session_state["sticker_exclude_products"] = draft
-                st.success("저장되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
-                st.rerun()
+            st.button("💾 제외목록 저장", use_container_width=True, on_click=_sticker_exclude_save)
         with c2:
-            if st.button("🧹 제외목록 초기화", use_container_width=True):
-                save_sticker_exclude([])
-                st.session_state["sticker_exclude_products"] = []
-                st.session_state["sticker_exclude_products_editor"] = []
-                st.session_state["sticker_exclude_products_extra"] = ""
-                st.success("초기화되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
-                st.rerun()
+            st.button("🧹 제외목록 초기화", use_container_width=True, on_click=_sticker_exclude_reset)
+
+        flash = st.session_state.pop("_sticker_exclude_flash", None)
+        if flash == "saved":
+            st.success("저장되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
+        elif flash == "reset":
+            st.success("초기화되었습니다. 저장된 값이 이번 생성부터 적용됩니다.")
 
         st.write("현재 저장된 값:", (", ".join(st.session_state.get("sticker_exclude_products", []) or []) or "없음"))
 
