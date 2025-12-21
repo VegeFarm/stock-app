@@ -102,6 +102,9 @@ BACKUP_DIR.mkdir(exist_ok=True)
 # ✅ TC 설정 저장 파일 (프로그램 껐다 켜도 유지)
 TC_SETTINGS_PATH = DATA_DIR / "tc_settings.json"
 
+# ✅ 스티커 제외 설정 저장 파일 (프로그램 껐다 켜도 유지)
+STICKER_SETTINGS_PATH = DATA_DIR / "sticker_settings.json"
+
 # ✅ 레포(앱 폴더)에 "TC주문_등록양식.xlsx" 파일을 같이 올려두면 업로드 없이 자동 사용
 TC_TEMPLATE_DEFAULT_PATH = Path("TC주문_등록양식.xlsx")
 
@@ -934,6 +937,52 @@ REQUIRED_COL_GROUPS = OrderedDict(
         ("배송메세지", ["배송메세지", "배송메시지", "배송 메시지", "배송 메세지", "배송요청사항", "요청사항"]),
     ]
 )
+
+
+# -------------------- ✅ Sticker Exclude Settings (persist) --------------------
+def load_sticker_exclude() -> List[str]:
+    """스티커용지 PDF에서 제외할 상품명 목록을 로드합니다."""
+    if not STICKER_SETTINGS_PATH.exists():
+        return []
+    try:
+        data = json.loads(STICKER_SETTINGS_PATH.read_text(encoding="utf-8"))
+        # allow either list or {"exclude":[...]}
+        if isinstance(data, dict):
+            data = data.get("exclude", [])
+        if not isinstance(data, list):
+            return []
+        out: List[str] = []
+        seen = set()
+        for x in data:
+            s = normalize_text(x)
+            if not s:
+                continue
+            if s in seen:
+                continue
+            out.append(s)
+            seen.add(s)
+        return out
+    except Exception:
+        return []
+
+
+def save_sticker_exclude(exclude: List[str]) -> None:
+    exclude = exclude or []
+    out: List[str] = []
+    seen = set()
+    for x in exclude:
+        s = normalize_text(x)
+        if not s:
+            continue
+        if s in seen:
+            continue
+        out.append(s)
+        seen.add(s)
+    STICKER_SETTINGS_PATH.write_text(
+        json.dumps({"exclude": out}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
 
 
 def _missing_required_cols(df: pd.DataFrame) -> List[str]:
@@ -2288,29 +2337,40 @@ def render_excel_results_page():
     st.subheader("🏷️ 스티커용지 PDF")
 
     # ✅ 스티커로 출력하지 않을 상품 설정 (펼쳐보기)
+    # - 저장한 제외목록은 data/sticker_settings.json 에 남아 이후에도 자동 적용됩니다.
     if "sticker_exclude_products" not in st.session_state:
-        st.session_state["sticker_exclude_products"] = []
+        st.session_state["sticker_exclude_products"] = load_sticker_exclude()
 
     product_options = sorted(
         [p for p in summary["제품명"].dropna().astype(str).str.strip().unique().tolist() if p]
     )
 
+    saved_all = st.session_state.get("sticker_exclude_products", []) or []
+    saved_in_options = [p for p in saved_all if p in product_options]
+    saved_outside = [p for p in saved_all if p not in product_options]
+
+    # 기본은 "저장된 값"을 그대로 이번 생성에도 적용
+    merged = list(saved_all)
+
     with st.expander("🚫 스티커로 출력하지 않을 상품 설정", expanded=False):
-        st.caption("선택한 상품은 스티커용지 PDF 생성에서 제외됩니다.")
+        st.caption("선택한 상품은 스티커용지 PDF 생성에서 제외됩니다. (저장하면 다음 실행/다른 파일에도 동일 적용)")
+
         selected = st.multiselect(
-            "제외할 상품",
+            "제외할 상품 (현재 업로드한 파일에 존재하는 상품)",
             options=product_options,
-            default=[p for p in st.session_state.get("sticker_exclude_products", []) if p in product_options],
+            default=[p for p in saved_in_options if p in product_options],
             key="sticker_exclude_products_editor",
         )
+
         extra_text = st.text_input(
-            "추가 제외(쉼표로 여러개 입력 · 정확히 일치)",
-            value="",
+            "추가 제외 (옵션에 없는 상품 · 쉼표로 여러개 입력 · 정확히 일치)",
+            value=",".join(saved_outside),
             key="sticker_exclude_products_extra",
             placeholder="예: 고수,딜",
         )
         extra = [normalize_text(x) for x in (extra_text or "").split(",") if normalize_text(x)]
 
+        # 이번 생성에 적용될 '미리보기' 목록 (저장 전에도 현재 화면 기준으로 적용)
         merged = []
         seen = set()
         for p2 in (selected + extra):
@@ -2318,14 +2378,26 @@ def render_excel_results_page():
                 merged.append(p2)
                 seen.add(p2)
 
-        st.session_state["sticker_exclude_products"] = merged
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("💾 제외목록 저장", use_container_width=True):
+                save_sticker_exclude(merged)
+                st.session_state["sticker_exclude_products"] = merged
+                st.success("저장되었습니다. 다음 실행에도 그대로 적용됩니다.")
+        with c2:
+            if st.button("🧹 제외목록 초기화", use_container_width=True):
+                save_sticker_exclude([])
+                st.session_state["sticker_exclude_products"] = []
+                st.session_state["sticker_exclude_products_editor"] = []
+                st.session_state["sticker_exclude_products_extra"] = ""
+                merged = []
+                st.success("초기화되었습니다.")
 
-        if merged:
-            st.write("현재 제외:", ", ".join(merged))
-        else:
-            st.write("현재 제외: 없음")
+        st.write("이번 생성에 적용(미리보기):", (", ".join(merged) if merged else "없음"))
+        st.write("현재 저장된 값:", (", ".join(st.session_state.get("sticker_exclude_products", []) or []) or "없음"))
 
-    exclude_set = set(st.session_state.get("sticker_exclude_products", []) or [])
+    exclude_set = set(merged or [])
+
     excluded_stickers = 0
 
     label_rows = []
