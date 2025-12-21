@@ -2576,7 +2576,7 @@ def render_product_totals_page():
                 use_container_width=True,
             )
         with c3:
-            if st.button("📝 재고등록", use_container_width=True):
+            if st.button("📦 재고등록", use_container_width=True):
                 st.session_state["show_register_panel"] = True
 
         if st.session_state.get("show_register_panel"):
