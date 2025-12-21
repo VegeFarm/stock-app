@@ -2312,7 +2312,7 @@ def render_excel_results_page():
 
     # 수취인별 출력
     st.markdown("---")
-    st.subheader("📄 수취인별 출력 - 새벽배송 / 익일배송 분리")
+    st.subheader("📄 수취인별 출력 ( 새벽 / 익일 )")
 
     base2 = base.copy()
     base2["배송구분"] = base2["옵션정보"].apply(classify_delivery)
@@ -2393,7 +2393,7 @@ def render_excel_results_page():
 
     # TC 주문 등록
     st.markdown("---")
-    st.subheader("🧾 TC주문_등록양식 (새벽/익일)")
+    st.subheader("🧾 TC주문_등록양식 ( 새벽 / 익일 )")
 
     if not TC_TEMPLATE_DEFAULT_PATH.exists():
         st.error("앱 폴더에 'TC주문_등록양식.xlsx' 파일이 없습니다. GitHub에 app.py와 같이 올려주세요.")
