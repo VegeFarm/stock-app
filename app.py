@@ -461,8 +461,11 @@ STICKER_ROWS = 13
 STICKER_PER_PAGE = STICKER_COLS * STICKER_ROWS  # 65
 STICKER_CELL_W_MM = 38.2
 STICKER_CELL_H_MM = 21.1
-STICKER_FONT_SIZE = 11
-STICKER_LEADING = 13
+STICKER_FONT_SIZE = 13
+STICKER_LEADING = 16
+# 프린터 출력 보정(살짝 오른쪽/위로 이동)
+STICKER_OFFSET_X_MM = 1.0  # mm
+STICKER_OFFSET_Y_MM = 1.0  # mm
 
 
 def _clean_access_message(msg: str) -> str:
@@ -729,8 +732,7 @@ def mapping_list_from_df(edited: pd.DataFrame) -> List[Dict]:
 
 # -------------------- Backups (Excel) --------------------
 def backup_rules_to_excel(mapping_rules: List[Dict], expr_rules: Dict) -> Path:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = BACKUP_DIR / f"rules_backup_{ts}.xlsx"
+    out_path = BACKUP_DIR / "상품별매칭규칙_백업.xlsx"
 
     df_map = mapping_df_from_list(mapping_rules).rename(
         columns={
@@ -811,7 +813,7 @@ def sidebar_expression_rules():
     units = expr.get("units", [])
     default_unit = normalize_text(expr.get("default_unit", "개")) or "개"
 
-    with st.sidebar.expander("🧩 표현규칙", expanded=False):
+    with st.sidebar.expander("⚙️ 표현규칙", expanded=False):
         st.caption("합산규칙(N)을 적용할 단위를 관리합니다. (통/개/팩/봉 등)")
 
         df = pd.DataFrame(units)
@@ -1356,8 +1358,8 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
     grid_w_pt = cell_w_pt * STICKER_COLS
     grid_h_pt = cell_h_pt * STICKER_ROWS
 
-    x0 = (page_w_pt - grid_w_pt) / 2.0
-    y0 = (page_h_pt - grid_h_pt) / 2.0
+    x0 = (page_w_pt - grid_w_pt) / 2.0 + (STICKER_OFFSET_X_MM * mm)
+    y0 = (page_h_pt - grid_h_pt) / 2.0 + (STICKER_OFFSET_Y_MM * mm)
 
     total = len(label_texts)
     page_count = (total + STICKER_PER_PAGE - 1) // STICKER_PER_PAGE if total else 1
@@ -2041,17 +2043,17 @@ if "page" not in st.session_state:
 
 with st.sidebar:
     st.markdown("## 📌 메뉴")
-    if st.button("⬆️ 엑셀 업로드 & 결과", use_container_width=True):
+    if st.button("📥 엑셀 업로드 & 결과", use_container_width=True):
         st.session_state["page"] = "excel_results"
-        st.rerun()
-    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
-        st.session_state["page"] = "mapping_rules"
         st.rerun()
     if st.button("🧾 제품별 합계", use_container_width=True):
         st.session_state["page"] = "product_totals"
         st.rerun()
     if st.button("📦 재고관리", use_container_width=True):
         st.session_state["page"] = "inventory"
+        st.rerun()
+    if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
+        st.session_state["page"] = "mapping_rules"
         st.rerun()
     st.divider()
 
@@ -2060,7 +2062,31 @@ with st.sidebar:
 # Pages
 # =====================================================
 def render_mapping_rules_page():
+    # 🔒 비밀번호 보호 (상품명 매칭 규칙)
+    if "mapping_authed" not in st.session_state:
+        st.session_state["mapping_authed"] = False
+
+    if not st.session_state["mapping_authed"]:
+        st.title("🔒 상품명 매칭 규칙")
+        st.caption("이 메뉴는 비밀번호가 필요합니다.")
+        with st.form("mapping_pw_form"):
+            pw = st.text_input("비밀번호", type="password")
+            ok = st.form_submit_button("입장", use_container_width=True)
+        if ok:
+            if (pw or "").strip() == "1390":
+                st.session_state["mapping_authed"] = True
+                st.success("인증 완료!")
+                st.rerun()
+            else:
+                st.error("비밀번호가 올바르지 않습니다.")
+        return
+
     st.title("🧩 상품명 매칭 규칙")
+    if st.button("🔓 잠금 해제(로그아웃)", use_container_width=False, key="mapping_logout_btn"):
+        st.session_state["mapping_authed"] = False
+        st.success("잠금 상태로 전환되었습니다.")
+        st.rerun()
+
     st.caption("엑셀의 실제 상품명 → 표시될 상품명으로 매핑하고, 합산규칙(N)도 설정합니다.")
 
     sidebar_backup_folder()
@@ -2115,7 +2141,7 @@ def render_mapping_rules_page():
 
 
 def render_excel_results_page():
-    st.title("⬆️ 엑셀 업로드 & 결과")
+    st.title("📥 엑셀 업로드 & 결과")
     st.caption("엑셀 업로드 → 제품별 집계 + 수취인별 PDF + 스티커용지 PDF + TC주문_등록양식 자동작성")
     st.markdown("---")
 
@@ -2130,7 +2156,7 @@ def render_excel_results_page():
     if "tc_type_next" not in st.session_state:
         st.session_state.tc_type_next = tc_saved["next"]
 
-    with st.sidebar.expander("🧾 TC주문_등록 설정", expanded=False):
+    with st.sidebar.expander("🔧 배송방법 설정", expanded=False):
         st.caption("변경 후 [저장]을 누르면 다음 실행에도 그대로 유지됩니다.")
 
         dawn_val = st.text_input(
@@ -2241,7 +2267,7 @@ def render_excel_results_page():
     st.session_state["excel_default_unit"] = default_unit
 
     # -------------------- Results --------------------
-    with st.expander("✅ 결과 (제품명 / 구분 / 수량)", expanded=True):
+    with st.expander("✅ 결과 (제품명 / 구분 / 수량)", expanded=False):
         st.dataframe(summary, use_container_width=True, height=520)
 
     with st.expander("⚠️ 미매칭/누락 행 (규칙 추가용)", expanded=False):
@@ -2252,14 +2278,14 @@ def render_excel_results_page():
     st.download_button(
         "⬇️ 제품별 개수 PDF 다운로드",
         data=build_summary_pdf(summary),
-        file_name=f"제품별개수_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+        file_name="제품별개수.pdf",
         mime="application/pdf",
         use_container_width=True,
     )
 
     # 스티커 PDF
     st.markdown("---")
-    st.subheader("🏷️ 스티커용지 PDF (A4 / 65칸 / 38.2×21.1mm)")
+    st.subheader("🏷️ 스티커용지 PDF")
 
     label_rows = []
     for _, r in summary.iterrows():
@@ -2275,18 +2301,18 @@ def render_excel_results_page():
     for label, qty in label_rows:
         sticker_texts.extend([label] * qty)
 
-    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt")
+    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm")
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
         data=build_sticker_pdf(sticker_texts),
-        file_name=f"스티커용지_65칸_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+        file_name="스티커용지.pdf",
         mime="application/pdf",
         use_container_width=True,
     )
 
     # 수취인별 출력
     st.markdown("---")
-    st.subheader("📄 수취인별 출력 - 새벽배송 / 익일배송 분리")
+    st.subheader("📄 수취인별 출력 ( 새벽 / 익일 )")
 
     base2 = base.copy()
     base2["배송구분"] = base2["옵션정보"].apply(classify_delivery)
@@ -2350,7 +2376,7 @@ def render_excel_results_page():
         st.download_button(
             "⬇️ 새벽배송 수취인별 PDF",
             data=build_recipient_pdf(dawn_entries),
-            file_name=f"수취인별_새벽배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+            file_name="새벽배송.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
@@ -2360,14 +2386,14 @@ def render_excel_results_page():
         st.download_button(
             "⬇️ 익일배송 수취인별 PDF",
             data=build_recipient_pdf(next_entries),
-            file_name=f"수취인별_익일배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.pdf",
+            file_name="익일배송.pdf",
             mime="application/pdf",
             use_container_width=True,
         )
 
     # TC 주문 등록
     st.markdown("---")
-    st.subheader("🧾 TC주문_등록양식 자동작성 (새벽/익일 각각 엑셀 생성)")
+    st.subheader("🧾 TC주문_등록양식 ( 새벽 / 익일 )")
 
     if not TC_TEMPLATE_DEFAULT_PATH.exists():
         st.error("앱 폴더에 'TC주문_등록양식.xlsx' 파일이 없습니다. GitHub에 app.py와 같이 올려주세요.")
@@ -2430,7 +2456,7 @@ def render_excel_results_page():
                 st.download_button(
                     "⬇️ TC주문_등록양식(새벽배송) 엑셀 다운로드",
                     data=out_bytes,
-                    file_name=f"TC주문_등록양식_새벽배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+                    file_name="새벽배송_송장.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
@@ -2442,7 +2468,7 @@ def render_excel_results_page():
                 st.download_button(
                     "⬇️ TC주문_등록양식(익일배송) 엑셀 다운로드",
                     data=out_bytes,
-                    file_name=f"TC주문_등록양식_익일배송_{datetime.now(KST_TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+                    file_name="익일배송_송장.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
@@ -2456,8 +2482,8 @@ def render_product_totals_page():
     default_unit = st.session_state.get("excel_default_unit", "개")
 
     if summary_df is None or len(summary_df) == 0:
-        st.info("먼저 [⬆️ 엑셀 업로드 & 결과] 페이지에서 엑셀을 업로드해 주세요.")
-        if st.button("⬆️ 엑셀 업로드 & 결과로 이동", use_container_width=True):
+        st.info("먼저 [📥 엑셀 업로드 & 결과] 페이지에서 엑셀을 업로드해 주세요.")
+        if st.button("📥 엑셀 업로드 & 결과로 이동", use_container_width=True):
             st.session_state["page"] = "excel_results"
             st.rerun()
         return
@@ -2540,7 +2566,7 @@ def render_product_totals_page():
             st.download_button(
                 "📄 PDF 다운로드(제품별합계)",
                 data=pdf_bytes,
-                file_name="제품별_합계.pdf",
+                file_name="제품별합계.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
@@ -2548,12 +2574,12 @@ def render_product_totals_page():
             st.download_button(
                 "🖼️ 스크린샷(PNG) 다운로드",
                 data=sum_png_one,
-                file_name=f"{now_prefix_kst()}_제품별합계.png",
+                file_name="제품별합계(스크린샷).png",
                 mime="image/png",
                 use_container_width=True,
             )
         with c3:
-            if st.button("📝 재고등록", use_container_width=True):
+            if st.button("📦 재고등록", use_container_width=True):
                 st.session_state["show_register_panel"] = True
 
         if st.session_state.get("show_register_panel"):
