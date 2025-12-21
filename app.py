@@ -2038,7 +2038,7 @@ st.set_page_config(
 
 # ----- Navigation -----
 if "page" not in st.session_state:
-    # ✅ 요청: 처음 열면 "엑셀 업로드 & 결과"가 먼저
+    # ✅ 요청: 처음 열면 "엑셀 업로드"가 먼저
     st.session_state["page"] = "excel_results"
 
 with st.sidebar:
@@ -2141,7 +2141,7 @@ def render_mapping_rules_page():
 
 
 def render_excel_results_page():
-    st.title("📥 엑셀 업로드 & 결과")
+    st.title("📥 엑셀 업로드")
     st.caption("엑셀 업로드 → 제품별 집계 + 수취인별 PDF + 스티커용지 PDF + TC주문_등록양식 자동작성")
     st.markdown("---")
 
@@ -2482,8 +2482,8 @@ def render_product_totals_page():
     default_unit = st.session_state.get("excel_default_unit", "개")
 
     if summary_df is None or len(summary_df) == 0:
-        st.info("먼저 [📥 엑셀 업로드 & 결과] 페이지에서 엑셀을 업로드해 주세요.")
-        if st.button("📥 엑셀 업로드 & 결과로 이동", use_container_width=True):
+        st.info("먼저 [📥 엑셀 업로드] 페이지에서 엑셀을 업로드해 주세요.")
+        if st.button("📥 엑셀 업로드로 이동", use_container_width=True):
             st.session_state["page"] = "excel_results"
             st.rerun()
         return
