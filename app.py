@@ -104,7 +104,6 @@ TC_SETTINGS_PATH = DATA_DIR / "tc_settings.json"
 
 # ✅ 스티커 제외 설정 저장 파일 (프로그램 껐다 켜도 유지)
 STICKER_SETTINGS_PATH = DATA_DIR / "sticker_settings.json"
-STICKER_LAYOUT_PATH = DATA_DIR / "sticker_layout.json"
 
 # ✅ 레포(앱 폴더)에 "TC주문_등록양식.xlsx" 파일을 같이 올려두면 업로드 없이 자동 사용
 TC_TEMPLATE_DEFAULT_PATH = Path("TC주문_등록양식.xlsx")
@@ -985,66 +984,6 @@ def save_sticker_exclude(exclude: List[str]) -> None:
     )
 
 
-# -------------------- ✅ Sticker Layout Settings (persist) --------------------
-def default_sticker_layout() -> Dict:
-    """엑셀 라벨시트(A4) 기준 스티커 레이아웃 기본값"""
-    return {
-        # 엑셀 사용자 지정 여백 (cm)
-        "margin_left_cm": 0.5,
-        "margin_top_cm": 1.1,
-        "margin_right_cm": 0.4,
-        "margin_bottom_cm": 1.0,
-        # 스티커 간격 (mm) - 세로는 0, 가로는 0.3
-        "gap_x_mm": 0.3,
-        "gap_y_mm": 0.0,
-        # 프린터/용지 미세 보정 (mm) - +면 오른쪽/위로 이동
-        "offset_x_mm": 0.0,
-        "offset_y_mm": 0.0,
-        # 채우기 방향: row(가로 우선), column(세로 우선)
-        "fill_order": "row",
-        # A4 영역에 맞추기(자동 축소/확대) - 엑셀 '페이지에 맞추기' 같은 효과
-        "auto_scale": False,
-        # 테스트용 격자선
-        "draw_grid": False,
-    }
-
-
-def load_sticker_layout() -> Dict:
-    default = default_sticker_layout()
-    if not STICKER_LAYOUT_PATH.exists():
-        return default
-    try:
-        data = json.loads(STICKER_LAYOUT_PATH.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return default
-        merged = {**default, **data}
-        # sanitize
-        merged["fill_order"] = str(merged.get("fill_order", "row")).strip().lower()
-        if merged["fill_order"] not in ("row", "column"):
-            merged["fill_order"] = "row"
-        merged["auto_scale"] = bool(merged.get("auto_scale", False))
-        merged["draw_grid"] = bool(merged.get("draw_grid", False))
-        return merged
-    except Exception:
-        return default
-
-
-def save_sticker_layout(layout: Dict) -> None:
-    default = default_sticker_layout()
-    layout = layout or {}
-    merged = {**default, **layout}
-    merged["fill_order"] = str(merged.get("fill_order", "row")).strip().lower()
-    if merged["fill_order"] not in ("row", "column"):
-        merged["fill_order"] = "row"
-    merged["auto_scale"] = bool(merged.get("auto_scale", False))
-    merged["draw_grid"] = bool(merged.get("draw_grid", False))
-
-    STICKER_LAYOUT_PATH.write_text(
-        json.dumps(merged, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
 
 def _missing_required_cols(df: pd.DataFrame) -> List[str]:
     missing = []
@@ -1450,64 +1389,9 @@ def _draw_center_text(c: canvas.Canvas, font_name: str, font_size: int, x_center
     c.drawText(t)
 
 
-def build_sticker_pdf(
-    label_texts: List[str],
-    layout: Optional[Dict] = None,
-    fill_order: Optional[str] = None,
-    draw_grid: Optional[bool] = None,
-    auto_scale: Optional[bool] = None,
-) -> bytes:
-    """
-    엑셀 라벨시트 인쇄 설정(여백/간격)을 기준으로 A4 위에 스티커를 배치해 PDF를 만듭니다.
+def build_sticker_pdf(label_texts: List[str]) -> bytes:
+    buf = io.BytesIO()
 
-    - 여백: cm (엑셀 사용자 지정 여백 단위)
-    - 스티커 크기: mm
-    - 스티커 간격: mm
-    - fill_order: row(가로 우선), column(세로 우선)
-    - draw_grid: 테스트용 격자선
-    - auto_scale: A4 가능 영역에 맞추기(엑셀 '페이지에 맞추기' 느낌)
-    """
-    cfg = default_sticker_layout()
-    if isinstance(layout, dict):
-        cfg.update(layout)
-
-    if fill_order is not None:
-        cfg["fill_order"] = str(fill_order).strip().lower()
-    if draw_grid is not None:
-        cfg["draw_grid"] = bool(draw_grid)
-    if auto_scale is not None:
-        cfg["auto_scale"] = bool(auto_scale)
-
-    order = str(cfg.get("fill_order", "row")).strip().lower()
-    if order not in ("row", "column"):
-        order = "row"
-
-    # ---- unit helpers ----
-    def cm_to_mm(x) -> float:
-        try:
-            return float(x) * 10.0
-        except Exception:
-            return 0.0
-
-    def to_f(x, default=0.0) -> float:
-        try:
-            return float(x)
-        except Exception:
-            return float(default)
-
-    # ---- margins / gaps ----
-    margin_left_mm = cm_to_mm(cfg.get("margin_left_cm", 0.5))
-    margin_top_mm = cm_to_mm(cfg.get("margin_top_cm", 1.1))
-    margin_right_mm = cm_to_mm(cfg.get("margin_right_cm", 0.4))
-    margin_bottom_mm = cm_to_mm(cfg.get("margin_bottom_cm", 1.0))
-
-    gap_x_mm = to_f(cfg.get("gap_x_mm", 0.3), 0.3)
-    gap_y_mm = to_f(cfg.get("gap_y_mm", 0.0), 0.0)
-
-    offset_x_mm = to_f(cfg.get("offset_x_mm", 0.0), 0.0)
-    offset_y_mm = to_f(cfg.get("offset_y_mm", 0.0), 0.0)
-
-    # ---- fonts ----
     font_name = "Helvetica"
     try:
         pdfmetrics.registerFont(UnicodeCIDFont("HYGothic-Medium"))
@@ -1515,38 +1399,16 @@ def build_sticker_pdf(
     except Exception:
         pass
 
-    buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     page_w_pt, page_h_pt = A4
 
-    base_cell_w_pt = STICKER_CELL_W_MM * mm
-    base_cell_h_pt = STICKER_CELL_H_MM * mm
-    base_gap_x_pt = gap_x_mm * mm
-    base_gap_y_pt = gap_y_mm * mm
+    cell_w_pt = STICKER_CELL_W_MM * mm
+    cell_h_pt = STICKER_CELL_H_MM * mm
+    grid_w_pt = cell_w_pt * STICKER_COLS
+    grid_h_pt = cell_h_pt * STICKER_ROWS
 
-    # ---- compute grid size (unscaled) ----
-    grid_w_pt = (base_cell_w_pt * STICKER_COLS) + (base_gap_x_pt * (STICKER_COLS - 1))
-    grid_h_pt = (base_cell_h_pt * STICKER_ROWS) + (base_gap_y_pt * (STICKER_ROWS - 1))
-
-    # ---- available size inside margins ----
-    avail_w_pt = page_w_pt - ((margin_left_mm + margin_right_mm) * mm)
-    avail_h_pt = page_h_pt - ((margin_top_mm + margin_bottom_mm) * mm)
-
-    scale = 1.0
-    if bool(cfg.get("auto_scale", False)) and (grid_w_pt > 0 and grid_h_pt > 0):
-        scale = min(avail_w_pt / grid_w_pt, avail_h_pt / grid_h_pt)
-        # 너무 과격한 확대는 금지(인쇄 오차 커짐). 축소는 허용.
-        scale = min(1.0, max(0.5, scale))
-
-    cell_w_pt = base_cell_w_pt * scale
-    cell_h_pt = base_cell_h_pt * scale
-    gap_x_pt = base_gap_x_pt * scale
-    gap_y_pt = base_gap_y_pt * scale
-
-    # ---- origin: "여백 기준" (센터정렬 X) ----
-    x0 = (margin_left_mm + offset_x_mm) * mm
-    # y는 아래 기준 좌표이므로, top margin에서 내려온 첫 라벨의 "하단" 위치를 계산
-    y_top_cell_bottom = page_h_pt - (margin_top_mm * mm) - cell_h_pt + (offset_y_mm * mm)
+    x0 = (page_w_pt - grid_w_pt) / 2.0 + (STICKER_OFFSET_X_MM * mm)
+    y0 = (page_h_pt - grid_h_pt) / 2.0 + (STICKER_OFFSET_Y_MM * mm)
 
     total = len(label_texts)
     page_count = (total + STICKER_PER_PAGE - 1) // STICKER_PER_PAGE if total else 1
@@ -1554,41 +1416,25 @@ def build_sticker_pdf(
     pad_x = 2.0 * mm
     max_text_w = cell_w_pt - (pad_x * 2)
 
-    if cfg.get("draw_grid", False):
-        c.setStrokeColor(colors.lightgrey)
-        c.setLineWidth(0.2)
-
     for p in range(page_count):
         c.setFillColor(colors.black)
         c.setFont(font_name, STICKER_FONT_SIZE)
 
         for r in range(STICKER_ROWS):
             for col in range(STICKER_COLS):
-                # ✅ 채우기 방향
-                if order == "row":
-                    slot = r * STICKER_COLS + col
-                else:
-                    slot = col * STICKER_ROWS + r
-
+                slot = r * STICKER_COLS + col
                 global_i = p * STICKER_PER_PAGE + slot
                 if global_i >= total:
                     continue
 
                 text = (label_texts[global_i] or "").strip()
-                if not text:
-                    continue
 
-                x = x0 + col * (cell_w_pt + gap_x_pt)
-                y = y_top_cell_bottom - r * (cell_h_pt + gap_y_pt)
+                x = x0 + col * cell_w_pt
+                y = y0 + (STICKER_ROWS - 1 - r) * cell_h_pt
 
-                # 테스트용 격자선
-                if cfg.get("draw_grid", False):
-                    c.rect(x, y, cell_w_pt, cell_h_pt, stroke=1, fill=0)
-
-                # ✅ 각 스티커 "정중앙"에 상품명
                 lines = _wrap_for_cell(text, font_name, STICKER_FONT_SIZE, max_text_w)[:2]
-                cx = x + (cell_w_pt / 2.0)
 
+                cx = x + cell_w_pt / 2.0
                 if len(lines) == 1:
                     cy = y + (cell_h_pt / 2.0) - (STICKER_FONT_SIZE * 0.35)
                     _draw_center_text(c, font_name, STICKER_FONT_SIZE, cx, cy, lines[0])
@@ -1601,9 +1447,6 @@ def build_sticker_pdf(
 
         if p < page_count - 1:
             c.showPage()
-            if cfg.get("draw_grid", False):
-                c.setStrokeColor(colors.lightgrey)
-                c.setLineWidth(0.2)
 
     c.save()
     return buf.getvalue()
@@ -2582,131 +2425,10 @@ def render_excel_results_page():
     for label, qty in label_rows:
         sticker_texts.extend([label] * qty)
 
-    # ✅ 라벨시트 레이아웃(여백/간격) 설정: 엑셀 인쇄 설정 기준
-    if "sticker_layout" not in st.session_state:
-        st.session_state["sticker_layout"] = load_sticker_layout()
-
-    cfg = st.session_state.get("sticker_layout") or default_sticker_layout()
-
-    # 세션 키 초기화
-    def _init_num_key(k: str, v: float):
-        if k not in st.session_state:
-            st.session_state[k] = float(v)
-
-    _init_num_key("sticker_margin_left_cm", cfg.get("margin_left_cm", 0.5))
-    _init_num_key("sticker_margin_top_cm", cfg.get("margin_top_cm", 1.1))
-    _init_num_key("sticker_margin_right_cm", cfg.get("margin_right_cm", 0.4))
-    _init_num_key("sticker_margin_bottom_cm", cfg.get("margin_bottom_cm", 1.0))
-    _init_num_key("sticker_gap_x_mm", cfg.get("gap_x_mm", 0.3))
-    _init_num_key("sticker_gap_y_mm", cfg.get("gap_y_mm", 0.0))
-    _init_num_key("sticker_offset_x_mm", cfg.get("offset_x_mm", 0.0))
-    _init_num_key("sticker_offset_y_mm", cfg.get("offset_y_mm", 0.0))
-
-    if "sticker_auto_scale" not in st.session_state:
-        st.session_state["sticker_auto_scale"] = bool(cfg.get("auto_scale", False))
-    if "sticker_draw_grid" not in st.session_state:
-        st.session_state["sticker_draw_grid"] = bool(cfg.get("draw_grid", False))
-    if "sticker_fill_order" not in st.session_state:
-        st.session_state["sticker_fill_order"] = str(cfg.get("fill_order", "row")).strip().lower()
-
-    with st.expander("🧷 라벨시트(여백/간격) 설정", expanded=False):
-        st.caption("엑셀 인쇄 설정(사용자 지정 여백/간격)과 동일하게 맞추는 영역입니다. "
-                   "출력이 살짝 밀리면 '보정(mm)'만 0.2~0.5 단위로 조절해보세요.")
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.number_input("왼쪽 여백(cm)", min_value=0.0, max_value=5.0, step=0.1, key="sticker_margin_left_cm")
-        c2.number_input("위쪽 여백(cm)", min_value=0.0, max_value=5.0, step=0.1, key="sticker_margin_top_cm")
-        c3.number_input("오른쪽 여백(cm)", min_value=0.0, max_value=5.0, step=0.1, key="sticker_margin_right_cm")
-        c4.number_input("아래쪽 여백(cm)", min_value=0.0, max_value=5.0, step=0.1, key="sticker_margin_bottom_cm")
-
-        g1, g2, o1, o2 = st.columns(4)
-        g1.number_input("가로 간격(mm)", min_value=0.0, max_value=10.0, step=0.1, key="sticker_gap_x_mm")
-        g2.number_input("세로 간격(mm)", min_value=0.0, max_value=10.0, step=0.1, key="sticker_gap_y_mm")
-        o1.number_input("X 보정(mm) (+오른쪽)", min_value=-10.0, max_value=10.0, step=0.1, key="sticker_offset_x_mm")
-        o2.number_input("Y 보정(mm) (+위쪽)", min_value=-10.0, max_value=10.0, step=0.1, key="sticker_offset_y_mm")
-
-        r1, r2, r3 = st.columns([1.6, 1.0, 1.0])
-        fill_label = r1.radio(
-            "채우기 방향",
-            options=["가로(왼→오→아래)", "세로(위→아래→오른쪽)"],
-            horizontal=True,
-            index=0 if st.session_state.get("sticker_fill_order") != "column" else 1,
-        )
-        st.session_state["sticker_fill_order"] = "column" if str(fill_label).startswith("세로") else "row"
-        r2.checkbox("A4에 맞추기(자동 축소)", value=bool(st.session_state.get("sticker_auto_scale", False)), key="sticker_auto_scale")
-        r3.checkbox("테스트 격자선", value=bool(st.session_state.get("sticker_draw_grid", False)), key="sticker_draw_grid")
-
-        # 계산 정보(가로/세로가 A4에 들어가는지)
-        a4_w_mm, a4_h_mm = 210.0, 297.0
-        ml = float(st.session_state["sticker_margin_left_cm"]) * 10.0
-        mt = float(st.session_state["sticker_margin_top_cm"]) * 10.0
-        mr = float(st.session_state["sticker_margin_right_cm"]) * 10.0
-        mb = float(st.session_state["sticker_margin_bottom_cm"]) * 10.0
-        gx = float(st.session_state["sticker_gap_x_mm"])
-        gy = float(st.session_state["sticker_gap_y_mm"])
-
-        need_w = (STICKER_COLS * STICKER_CELL_W_MM) + ((STICKER_COLS - 1) * gx)
-        need_h = (STICKER_ROWS * STICKER_CELL_H_MM) + ((STICKER_ROWS - 1) * gy)
-        avail_w = a4_w_mm - (ml + mr)
-        avail_h = a4_h_mm - (mt + mb)
-
-        st.caption(f"가로 필요 {need_w:.1f}mm / 가능 {avail_w:.1f}mm · "
-                   f"세로 필요 {need_h:.1f}mm / 가능 {avail_h:.1f}mm "
-                   f"{('(자동축소 ON이면 맞춰짐)' if st.session_state.get('sticker_auto_scale') else '')}")
-
-        if st.button("💾 라벨 레이아웃 저장", use_container_width=True):
-            layout_to_save = {
-                "margin_left_cm": float(st.session_state["sticker_margin_left_cm"]),
-                "margin_top_cm": float(st.session_state["sticker_margin_top_cm"]),
-                "margin_right_cm": float(st.session_state["sticker_margin_right_cm"]),
-                "margin_bottom_cm": float(st.session_state["sticker_margin_bottom_cm"]),
-                "gap_x_mm": float(st.session_state["sticker_gap_x_mm"]),
-                "gap_y_mm": float(st.session_state["sticker_gap_y_mm"]),
-                "offset_x_mm": float(st.session_state["sticker_offset_x_mm"]),
-                "offset_y_mm": float(st.session_state["sticker_offset_y_mm"]),
-                "fill_order": st.session_state.get("sticker_fill_order", "row"),
-                "auto_scale": bool(st.session_state.get("sticker_auto_scale", False)),
-                "draw_grid": bool(st.session_state.get("sticker_draw_grid", False)),
-            }
-            save_sticker_layout(layout_to_save)
-            st.session_state["sticker_layout"] = load_sticker_layout()
-            st.success("저장되었습니다. 다음 실행에도 동일 적용됩니다.")
-
-    # 현재 입력값으로 PDF 생성(저장 전이라도 즉시 반영)
-    layout_current = {
-        "margin_left_cm": float(st.session_state["sticker_margin_left_cm"]),
-        "margin_top_cm": float(st.session_state["sticker_margin_top_cm"]),
-        "margin_right_cm": float(st.session_state["sticker_margin_right_cm"]),
-        "margin_bottom_cm": float(st.session_state["sticker_margin_bottom_cm"]),
-        "gap_x_mm": float(st.session_state["sticker_gap_x_mm"]),
-        "gap_y_mm": float(st.session_state["sticker_gap_y_mm"]),
-        "offset_x_mm": float(st.session_state["sticker_offset_x_mm"]),
-        "offset_y_mm": float(st.session_state["sticker_offset_y_mm"]),
-        "fill_order": st.session_state.get("sticker_fill_order", "row"),
-        "auto_scale": bool(st.session_state.get("sticker_auto_scale", False)),
-        "draw_grid": bool(st.session_state.get("sticker_draw_grid", False)),
-    }
-
-    st.caption(
-        f"총 {len(sticker_texts)}개 · 페이지당 {STICKER_PER_PAGE}칸 · A4 · "
-        f"여백(cm) L{layout_current['margin_left_cm']}/T{layout_current['margin_top_cm']}/R{layout_current['margin_right_cm']}/B{layout_current['margin_bottom_cm']} · "
-        f"간격(mm) X{layout_current['gap_x_mm']}/Y{layout_current['gap_y_mm']} · "
-        f"보정(mm) X{layout_current['offset_x_mm']}/Y{layout_current['offset_y_mm']} · "
-        f"채우기:{'세로' if layout_current['fill_order']=='column' else '가로'}"
-        f"{' · 자동축소' if layout_current['auto_scale'] else ''}"
-        f"{' · 격자선' if layout_current['draw_grid'] else ''}"
-        f" (제외 {excluded_stickers}개)"
-    )
-
+    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm (제외 {excluded_stickers}개)")
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
-        data=build_sticker_pdf(
-            sticker_texts,
-            layout=layout_current,
-            fill_order=layout_current["fill_order"],
-            draw_grid=layout_current["draw_grid"],
-            auto_scale=layout_current["auto_scale"],
-        ),
+        data=build_sticker_pdf(sticker_texts),
         file_name="스티커용지.pdf",
         mime="application/pdf",
         use_container_width=True,
