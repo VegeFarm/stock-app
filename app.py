@@ -491,6 +491,12 @@ STICKER_LEADING = 16
 STICKER_OFFSET_X_MM = 0.0
 STICKER_OFFSET_Y_MM = 0.0
 
+# ✅ 행별 텍스트 위치 미세보정
+# - 1~5행(상단 5줄): 상품명 위치를 "조금 더 위로"
+# - 12~13행(하단 2줄): 상품명 위치를 "조금 더 아래로"
+# (단위: mm, 필요하면 숫자만 조절하면 됩니다)
+STICKER_TEXT_SHIFT_TOP_ROWS_MM = 0.8
+STICKER_TEXT_SHIFT_BOTTOM_ROWS_MM = 0.8
 
 
 def _clean_access_message(msg: str) -> str:
@@ -1496,14 +1502,21 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
                 x = x0 + col * (cell_w_pt + gap_x_pt)
                 y = y_top - ((r + 1) * cell_h_pt) - (r * gap_y_pt)  # 셀의 하단
 
+                # ✅ 행별 텍스트 위치 미세보정 (요청: 1~5행 ↑ / 12~13행 ↓)
+                row_shift_pt = 0.0
+                if 0 <= r <= 4:
+                    row_shift_pt += STICKER_TEXT_SHIFT_TOP_ROWS_MM * mm
+                elif r in (11, 12):
+                    row_shift_pt -= STICKER_TEXT_SHIFT_BOTTOM_ROWS_MM * mm
+
                 lines = _wrap_for_cell(text, font_name, STICKER_FONT_SIZE, max_text_w)[:2]
                 cx = x + cell_w_pt / 2.0
 
                 if len(lines) == 1:
-                    cy = y + (cell_h_pt / 2.0) - (STICKER_FONT_SIZE * 0.35)
+                    cy = y + (cell_h_pt / 2.0) - (STICKER_FONT_SIZE * 0.35) + row_shift_pt
                     _draw_center_text(c, font_name, STICKER_FONT_SIZE, cx, cy, lines[0])
                 else:
-                    center = y + (cell_h_pt / 2.0)
+                    center = y + (cell_h_pt / 2.0) + row_shift_pt
                     upper_y = center + (STICKER_LEADING * 0.25)
                     lower_y = center - (STICKER_LEADING * 0.95)
                     _draw_center_text(c, font_name, STICKER_FONT_SIZE, cx, upper_y, lines[0])
