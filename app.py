@@ -3333,16 +3333,28 @@ def _sales_fmt_person(x) -> str:
 def render_sales_calc_page():
     st.title("💰 매출계산")
 
-    # 🔒 비밀번호 보호 (매출계산)
-    if not st.session_state.get("sales_authed", False):
+    # 🔒 비밀번호 보호 (매출계산)    # 🔒 비밀번호 보호 (매출계산)
+    # ⚠️ Streamlit 제약: 위젯이 생성된 뒤에는 동일 key의 session_state 값을 같은 run에서 직접 변경하면 오류가 납니다.
+    # 그래서 비밀번호 입력칸(value)은 건드리지 않고, 인증 성공 시에는 rerun 후(위젯 미생성 상태)에서만 초기화합니다.
+    if st.session_state.get("sales_authed", False):
+        # 인증된 상태에서는 비밀번호 입력값을 지워둠(이 run에서는 입력 위젯이 없어서 안전)
+        if "sales_password_input" in st.session_state:
+            try:
+                del st.session_state["sales_password_input"]
+            except Exception:
+                pass
+
+        if st.button("🔓 로그아웃", use_container_width=False, key="sales_logout_btn"):
+            st.session_state["sales_authed"] = False
+            st.rerun()
+    else:
         st.caption("비밀번호를 입력해야 접근할 수 있습니다.")
         pw = st.text_input("비밀번호", type="password", key="sales_password_input")
         col_login, _ = st.columns([1, 3])
         with col_login:
             if st.button("입장", use_container_width=True, key="sales_login_btn"):
-                if pw == "1390":
+                if (pw or "").strip() == "1390":
                     st.session_state["sales_authed"] = True
-                    st.session_state["sales_password_input"] = ""
                     st.rerun()
                 else:
                     st.error("비밀번호가 올바르지 않습니다.")
