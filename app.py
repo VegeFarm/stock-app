@@ -2488,7 +2488,8 @@ def render_excel_results_page():
 
     sticker_texts: List[str] = []
     for label, qty in label_rows:
-        sticker_texts.extend([label] * qty)    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · 용지 21×29.5cm · 여백 L/R0.4 T1.1 B1.0cm · 라벨 3.82×2.11cm · 가로간격 0.3cm(자동보정) (제외 {excluded_stickers}개)")
+        sticker_texts.extend([label] * qty)
+    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · 용지 21×29.5cm · 여백 L/R0.4 T1.1 B1.0cm · 라벨 3.82×2.11cm · 가로간격 0.3cm(자동보정) (제외 {excluded_stickers}개)")
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
         data=build_sticker_pdf(sticker_texts),
