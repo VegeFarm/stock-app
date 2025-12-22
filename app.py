@@ -75,8 +75,6 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 KST_TZ = ZoneInfo("Asia/Seoul")
 KST = timezone(timedelta(hours=9))  # for legacy functions
 
-APP_VERSION = "2025-12-22-salescalc-v2"
-
 
 def now_prefix_kst() -> str:
     return datetime.now(KST).strftime("%Y%m%d_%H%M%S")
@@ -2198,10 +2196,6 @@ if "page" not in st.session_state:
 
 with st.sidebar:
     st.markdown("## 📌 메뉴")
-    try:
-        st.caption(f"버전: {APP_VERSION} • 실행파일: {Path(__file__).name}")
-    except Exception:
-        st.caption(f"버전: {APP_VERSION}")
     if st.button("📥 엑셀 업로드", use_container_width=True):
         st.session_state["page"] = "excel_results"
         st.rerun()
@@ -2211,7 +2205,7 @@ with st.sidebar:
     if st.button("📦 재고관리", use_container_width=True):
         st.session_state["page"] = "inventory"
         st.rerun()
-    if st.button("💰 매출합계", use_container_width=True):
+    if st.button("💰 매출계산", use_container_width=True):
         st.session_state["page"] = "sales_calc"
         st.rerun()
     if st.button("🧩 상품명 매칭 규칙", use_container_width=True):
@@ -3337,7 +3331,7 @@ def _sales_fmt_person(x) -> str:
 
 
 def render_sales_calc_page():
-    st.title("💰 매출합계")
+    st.title("💰 매출계산")
 
     # 🔒 비밀번호 보호 (매출계산)
     if not st.session_state.get("sales_authed", False):
