@@ -495,8 +495,8 @@ STICKER_OFFSET_Y_MM = 0.0
 # - 1~5행(상단 5줄): 상품명 위치를 "조금 더 위로"
 # - 12~13행(하단 2줄): 상품명 위치를 "조금 더 아래로"
 # (단위: mm, 필요하면 숫자만 조절하면 됩니다)
-STICKER_TEXT_SHIFT_TOP_ROWS_MM = 1.6
-STICKER_TEXT_SHIFT_BOTTOM_ROWS_MM = 1.6
+STICKER_TEXT_SHIFT_TOP_ROWS_MM = 3.5
+STICKER_TEXT_SHIFT_BOTTOM_ROWS_MM = 3.5
 
 
 def _clean_access_message(msg: str) -> str:
