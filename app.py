@@ -458,17 +458,39 @@ RECIPIENT_LEADING = 15
 RECIPIENT_BLOCK_GAP_MM = 4.0
 RECIPIENT_LINE_AFTER_MM = 4.0
 
-# 스티커 용지 설정 (A4 / 65칸 / 38.2x21.1mm)
+# 스티커 용지 설정 (21×29.5cm / 65칸 / 3.82×2.11cm)
 STICKER_COLS = 5
 STICKER_ROWS = 13
 STICKER_PER_PAGE = STICKER_COLS * STICKER_ROWS  # 65
+
+# 용지 크기 (mm)  -> 21×29.5cm
+STICKER_PAGE_W_MM = 210.0
+STICKER_PAGE_H_MM = 295.0
+
+# 사용자 지정 여백 (cm -> mm)
+STICKER_MARGIN_LEFT_MM = 4.0
+STICKER_MARGIN_RIGHT_MM = 4.0
+STICKER_MARGIN_TOP_MM = 11.0
+STICKER_MARGIN_BOTTOM_MM = 10.0
+
+# 스티커(라벨) 크기 (mm) -> 3.82×2.11cm
 STICKER_CELL_W_MM = 38.2
 STICKER_CELL_H_MM = 21.1
+
+# 스티커 간격: 상/하 0cm, 좌/우 0.3cm
+# ⚠️ 다만 "용지(21cm) - 여백(0.4cm*2)" 폭 안에 5칸을 맞추기 위해,
+#     가로 간격은 필요 시 0.3cm보다 아주 조금(≈0.025cm) 줄어들 수 있습니다.
+STICKER_GAP_X_MM = 3.0
+STICKER_GAP_Y_MM = 0.0
+
+# 글자
 STICKER_FONT_SIZE = 13
 STICKER_LEADING = 16
-# 프린터 출력 보정(살짝 오른쪽/위로 이동)
-STICKER_OFFSET_X_MM = 1.0  # mm
-STICKER_OFFSET_Y_MM = 1.0  # mm
+
+# 프린터 출력 보정(필요 시 수동 조정, 기본 0)
+STICKER_OFFSET_X_MM = 0.0
+STICKER_OFFSET_Y_MM = 0.0
+
 
 
 def _clean_access_message(msg: str) -> str:
@@ -1390,6 +1412,14 @@ def _draw_center_text(c: canvas.Canvas, font_name: str, font_size: int, x_center
 
 
 def build_sticker_pdf(label_texts: List[str]) -> bytes:
+    """
+    스티커(라벨) PDF 출력
+    - 용지: 21×29.5cm
+    - 여백: L/R 0.4cm, T 1.1cm, B 1.0cm
+    - 라벨: 3.82×2.11cm, 5×13 = 65칸
+    - 간격: 좌/우 0.3cm, 상/하 0cm (폭/여백을 맞추기 위해 가로 간격은 자동 보정될 수 있음)
+    - 각 라벨 중앙에 상품명(텍스트) 출력
+    """
     buf = io.BytesIO()
 
     font_name = "Helvetica"
@@ -1399,16 +1429,48 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
     except Exception:
         pass
 
-    c = canvas.Canvas(buf, pagesize=A4)
-    page_w_pt, page_h_pt = A4
+    pagesize = (STICKER_PAGE_W_MM * mm, STICKER_PAGE_H_MM * mm)
+    c = canvas.Canvas(buf, pagesize=pagesize)
+    page_w_pt, page_h_pt = pagesize
+
+    left_pt = STICKER_MARGIN_LEFT_MM * mm
+    right_pt = STICKER_MARGIN_RIGHT_MM * mm
+    top_pt = STICKER_MARGIN_TOP_MM * mm
+    bottom_pt = STICKER_MARGIN_BOTTOM_MM * mm
 
     cell_w_pt = STICKER_CELL_W_MM * mm
     cell_h_pt = STICKER_CELL_H_MM * mm
-    grid_w_pt = cell_w_pt * STICKER_COLS
-    grid_h_pt = cell_h_pt * STICKER_ROWS
 
-    x0 = (page_w_pt - grid_w_pt) / 2.0 + (STICKER_OFFSET_X_MM * mm)
-    y0 = (page_h_pt - grid_h_pt) / 2.0 + (STICKER_OFFSET_Y_MM * mm)
+    # gap (가로는 "0.3cm" 목표이지만, 실제 폭/여백에 맞추기 위해 자동 보정)
+    gap_x_target_pt = STICKER_GAP_X_MM * mm
+    gap_y_target_pt = STICKER_GAP_Y_MM * mm
+
+    usable_w = page_w_pt - left_pt - right_pt
+    usable_h = page_h_pt - top_pt - bottom_pt
+
+    # 가로 간격 자동 보정(그리드가 여백을 침범하면 gap을 줄여서 맞춤)
+    if STICKER_COLS > 1:
+        grid_w_target = (STICKER_COLS * cell_w_pt) + ((STICKER_COLS - 1) * gap_x_target_pt)
+        if grid_w_target > usable_w + (0.1 * mm):
+            gap_x_pt = max(0.0, (usable_w - (STICKER_COLS * cell_w_pt)) / (STICKER_COLS - 1))
+        else:
+            gap_x_pt = gap_x_target_pt
+    else:
+        gap_x_pt = 0.0
+
+    # 세로는 기본 "0", 혹시라도 오차로 넘치면 gap을 줄여서(=0 유지) 맞춤
+    if STICKER_ROWS > 1:
+        grid_h_target = (STICKER_ROWS * cell_h_pt) + ((STICKER_ROWS - 1) * gap_y_target_pt)
+        if grid_h_target > usable_h + (0.1 * mm):
+            gap_y_pt = max(0.0, (usable_h - (STICKER_ROWS * cell_h_pt)) / (STICKER_ROWS - 1))
+        else:
+            gap_y_pt = gap_y_target_pt
+    else:
+        gap_y_pt = 0.0
+
+    # 시작점: 좌측 여백 기준, 상단 여백 기준(ReportLab은 좌하단이 (0,0))
+    x0 = left_pt + (STICKER_OFFSET_X_MM * mm)
+    y_top = (page_h_pt - top_pt) + (STICKER_OFFSET_Y_MM * mm)  # 첫 줄 스티커의 윗변
 
     total = len(label_texts)
     page_count = (total + STICKER_PER_PAGE - 1) // STICKER_PER_PAGE if total else 1
@@ -1428,13 +1490,15 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
                     continue
 
                 text = (label_texts[global_i] or "").strip()
+                if not text:
+                    continue
 
-                x = x0 + col * cell_w_pt
-                y = y0 + (STICKER_ROWS - 1 - r) * cell_h_pt
+                x = x0 + col * (cell_w_pt + gap_x_pt)
+                y = y_top - ((r + 1) * cell_h_pt) - (r * gap_y_pt)  # 셀의 하단
 
                 lines = _wrap_for_cell(text, font_name, STICKER_FONT_SIZE, max_text_w)[:2]
-
                 cx = x + cell_w_pt / 2.0
+
                 if len(lines) == 1:
                     cy = y + (cell_h_pt / 2.0) - (STICKER_FONT_SIZE * 0.35)
                     _draw_center_text(c, font_name, STICKER_FONT_SIZE, cx, cy, lines[0])
@@ -1450,6 +1514,7 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
 
     c.save()
     return buf.getvalue()
+
 
 
 # -------------------- TC 주문_등록양식 자동 채우기 --------------------
@@ -2423,9 +2488,7 @@ def render_excel_results_page():
 
     sticker_texts: List[str] = []
     for label, qty in label_rows:
-        sticker_texts.extend([label] * qty)
-
-    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm (제외 {excluded_stickers}개)")
+        sticker_texts.extend([label] * qty)    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · 용지 21×29.5cm · 여백 L/R0.4 T1.1 B1.0cm · 라벨 3.82×2.11cm · 가로간격 0.3cm(자동보정) (제외 {excluded_stickers}개)")
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
         data=build_sticker_pdf(sticker_texts),
