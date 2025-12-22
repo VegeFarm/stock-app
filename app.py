@@ -458,19 +458,30 @@ RECIPIENT_LEADING = 15
 RECIPIENT_BLOCK_GAP_MM = 4.0
 RECIPIENT_LINE_AFTER_MM = 4.0
 
-# 스티커 용지 설정 (A4 / 65칸 / 38.2x21.1mm)
+# 스티커 용지 설정 (A4 / 라벨시트 기준)
+# - 업로드된 엑셀(라벨 시트)의 페이지 여백/눈금에 맞춰서 설정했습니다.
+# - 기준: 좌/우 4.75mm, 상 11.0mm, 하 9.9mm / 5열×13행(=65칸)
+# - 가로: (라벨폭 38.152mm + 간격 2.435mm) × 5열
+# - 세로: 행 피치(=칸 높이) 20.6375mm × 13행
 STICKER_COLS = 5
 STICKER_ROWS = 13
 STICKER_PER_PAGE = STICKER_COLS * STICKER_ROWS  # 65
-STICKER_CELL_W_MM = 38.2
-STICKER_CELL_H_MM = 21.1
+
+STICKER_MARGIN_LEFT_MM = 4.75
+STICKER_MARGIN_RIGHT_MM = 4.75
+STICKER_MARGIN_TOP_MM = 11.0
+STICKER_MARGIN_BOTTOM_MM = 9.9
+
+STICKER_LABEL_W_MM = 38.1518218623
+STICKER_GAP_X_MM = 2.4352226721
+STICKER_PITCH_Y_MM = 20.6375  # (라벨 높이 + 세로 간격 포함, 라벨시트 행 높이와 동일)
+
 STICKER_FONT_SIZE = 13
 STICKER_LEADING = 16
-# 프린터 출력 보정(살짝 오른쪽/위로 이동)
-STICKER_OFFSET_X_MM = 1.0  # mm
-STICKER_OFFSET_Y_MM = 1.0  # mm
 
-
+# 프린터 출력 보정(필요 시 조정)
+STICKER_OFFSET_X_MM = 0.0  # mm (+면 오른쪽)
+STICKER_OFFSET_Y_MM = 0.0  # mm (+면 위쪽)
 def _clean_access_message(msg: str) -> str:
     s = str(msg or "").strip()
     return s if s else TC_ACCESS_FALLBACK
@@ -1402,19 +1413,19 @@ def build_sticker_pdf(label_texts: List[str], fill_order: str = "column", draw_g
     c = canvas.Canvas(buf, pagesize=A4)
     page_w_pt, page_h_pt = A4
 
-    cell_w_pt = STICKER_CELL_W_MM * mm
-    cell_h_pt = STICKER_CELL_H_MM * mm
-    grid_w_pt = cell_w_pt * STICKER_COLS
-    grid_h_pt = cell_h_pt * STICKER_ROWS
+    # 라벨시트(엑셀) 기준 좌표/크기
+    label_w_pt = STICKER_LABEL_W_MM * mm
+    gap_x_pt = STICKER_GAP_X_MM * mm
+    cell_h_pt = STICKER_PITCH_Y_MM * mm
 
-    x0 = (page_w_pt - grid_w_pt) / 2.0 + (STICKER_OFFSET_X_MM * mm)
-    y0 = (page_h_pt - grid_h_pt) / 2.0 + (STICKER_OFFSET_Y_MM * mm)
+    x_start = (STICKER_MARGIN_LEFT_MM * mm) + (STICKER_OFFSET_X_MM * mm)
+    y_top = page_h_pt - (STICKER_MARGIN_TOP_MM * mm) + (STICKER_OFFSET_Y_MM * mm)
 
     total = len(label_texts)
     page_count = (total + STICKER_PER_PAGE - 1) // STICKER_PER_PAGE if total else 1
 
     pad_x = 2.0 * mm
-    max_text_w = cell_w_pt - (pad_x * 2)
+    max_text_w = label_w_pt - (pad_x * 2)
 
     order = (fill_order or "column").strip().lower()
     if order not in ("row", "column"):
@@ -1435,11 +1446,11 @@ def build_sticker_pdf(label_texts: List[str], fill_order: str = "column", draw_g
                     slot = col * STICKER_ROWS + r
                 global_i = p * STICKER_PER_PAGE + slot
 
-                x = x0 + col * cell_w_pt
-                y = y0 + (STICKER_ROWS - 1 - r) * cell_h_pt
+                x = x_start + col * (label_w_pt + gap_x_pt)
+                y = y_top - (r + 1) * cell_h_pt
 
                 if draw_grid:
-                    c.rect(x, y, cell_w_pt, cell_h_pt, stroke=1, fill=0)
+                    c.rect(x, y, label_w_pt, cell_h_pt, stroke=1, fill=0)
 
                 if global_i >= total:
                     continue
@@ -1448,7 +1459,7 @@ def build_sticker_pdf(label_texts: List[str], fill_order: str = "column", draw_g
 
                 lines = _wrap_for_cell(text, font_name, STICKER_FONT_SIZE, max_text_w)[:2]
 
-                cx = x + cell_w_pt / 2.0
+                cx = x + label_w_pt / 2.0
                 if len(lines) == 1:
                     cy = y + (cell_h_pt / 2.0) - (STICKER_FONT_SIZE * 0.35)
                     _draw_center_text(c, font_name, STICKER_FONT_SIZE, cx, cy, lines[0])
@@ -2451,7 +2462,7 @@ def render_excel_results_page():
     fill_order = "column" if str(fill_label).startswith("세로") else "row"
 
     st.caption(
-        f"총 {len(sticker_texts)}개 · 페이지당 {STICKER_PER_PAGE}칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm · 채우기:{'세로' if fill_order=='column' else '가로'}"
+        f"총 {len(sticker_texts)}개 · 페이지당 {STICKER_PER_PAGE}칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 라벨폭 38.15mm · 가로간격 2.44mm · 세로피치 20.64mm · 채우기:{'세로' if fill_order=='column' else '가로'}"
         f"{' · 격자선ON' if draw_grid else ''} (제외 {excluded_stickers}개)"
     )
     st.download_button(
