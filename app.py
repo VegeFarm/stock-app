@@ -1279,7 +1279,7 @@ def build_summary_pdf(summary_df: pd.DataFrame) -> bytes:
 
 
 # -------------------- PDF 2) 수취인별 출력 --------------------
-def build_recipient_pdf(entries: List[Dict[str, str]]) -> bytes:
+def build_recipient_pdf(entries: List[Dict[str, str]], footer_prefix: str = "") -> bytes:
     buf = io.BytesIO()
 
     font_name = "Helvetica"
@@ -1288,6 +1288,9 @@ def build_recipient_pdf(entries: List[Dict[str, str]]) -> bytes:
         font_name = "HYGothic-Medium"
     except Exception:
         pass
+
+    footer_prefix = (footer_prefix or "").strip()
+    footer_font_size = 11
 
     left_margin = 12 * mm
     right_margin = 12 * mm
@@ -1314,6 +1317,29 @@ def build_recipient_pdf(entries: List[Dict[str, str]]) -> bytes:
     )
 
     usable_width = A4[0] - left_margin - right_margin
+
+    def _draw_footer(c: canvas.Canvas, _doc):
+        # 하단 중앙 페이지 표기: "새벽 -1-" / "익일 -2-" ...
+        if not footer_prefix:
+            return
+        try:
+            page_no = int(c.getPageNumber())
+        except Exception:
+            page_no = 1
+
+        txt = f"{footer_prefix} -{page_no}-"
+        y = 6 * mm  # 하단 여백 안쪽에 고정
+
+        c.saveState()
+        try:
+            c.setFont(font_name, footer_font_size)
+        except Exception:
+            c.setFont("Helvetica", footer_font_size)
+
+        w = _text_width_pt(txt, font_name, footer_font_size)
+        x = (A4[0] - w) / 2.0
+        c.drawString(x, y, txt)
+        c.restoreState()
 
     elems = []
     for e in entries:
@@ -1350,7 +1376,7 @@ def build_recipient_pdf(entries: List[Dict[str, str]]) -> bytes:
         )
         elems.append(block)
 
-    doc.build(elems)
+    doc.build(elems, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
     return buf.getvalue()
 
 
@@ -2576,7 +2602,7 @@ def render_excel_results_page():
         st.write(f"새벽배송: {len(dawn_entries)}명")
         st.download_button(
             "⬇️ 새벽배송 수취인별 PDF",
-            data=build_recipient_pdf(dawn_entries),
+            data=build_recipient_pdf(dawn_entries, footer_prefix="새벽"),
             file_name="새벽배송.pdf",
             mime="application/pdf",
             use_container_width=True,
@@ -2586,7 +2612,7 @@ def render_excel_results_page():
         st.write(f"익일배송: {len(next_entries)}명")
         st.download_button(
             "⬇️ 익일배송 수취인별 PDF",
-            data=build_recipient_pdf(next_entries),
+            data=build_recipient_pdf(next_entries, footer_prefix="익일"),
             file_name="익일배송.pdf",
             mime="application/pdf",
             use_container_width=True,
