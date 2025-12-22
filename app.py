@@ -1389,7 +1389,7 @@ def _draw_center_text(c: canvas.Canvas, font_name: str, font_size: int, x_center
     c.drawText(t)
 
 
-def build_sticker_pdf(label_texts: List[str]) -> bytes:
+def build_sticker_pdf(label_texts: List[str], fill_order: str = "column", draw_grid: bool = False) -> bytes:
     buf = io.BytesIO()
 
     font_name = "Helvetica"
@@ -1416,21 +1416,35 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
     pad_x = 2.0 * mm
     max_text_w = cell_w_pt - (pad_x * 2)
 
+    order = (fill_order or "column").strip().lower()
+    if order not in ("row", "column"):
+        order = "column"
+
     for p in range(page_count):
         c.setFillColor(colors.black)
         c.setFont(font_name, STICKER_FONT_SIZE)
+        if draw_grid:
+            c.setStrokeColor(colors.lightgrey)
+            c.setLineWidth(0.2)
 
         for r in range(STICKER_ROWS):
             for col in range(STICKER_COLS):
-                slot = r * STICKER_COLS + col
+                if order == "row":
+                    slot = r * STICKER_COLS + col
+                else:
+                    slot = col * STICKER_ROWS + r
                 global_i = p * STICKER_PER_PAGE + slot
+
+                x = x0 + col * cell_w_pt
+                y = y0 + (STICKER_ROWS - 1 - r) * cell_h_pt
+
+                if draw_grid:
+                    c.rect(x, y, cell_w_pt, cell_h_pt, stroke=1, fill=0)
+
                 if global_i >= total:
                     continue
 
                 text = (label_texts[global_i] or "").strip()
-
-                x = x0 + col * cell_w_pt
-                y = y0 + (STICKER_ROWS - 1 - r) * cell_h_pt
 
                 lines = _wrap_for_cell(text, font_name, STICKER_FONT_SIZE, max_text_w)[:2]
 
@@ -1450,6 +1464,7 @@ def build_sticker_pdf(label_texts: List[str]) -> bytes:
 
     c.save()
     return buf.getvalue()
+
 
 
 # -------------------- TC 주문_등록양식 자동 채우기 --------------------
@@ -2425,14 +2440,28 @@ def render_excel_results_page():
     for label, qty in label_rows:
         sticker_texts.extend([label] * qty)
 
-    st.caption(f"총 {len(sticker_texts)}개 · 페이지당 65칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm (제외 {excluded_stickers}개)")
+    fill_label = st.radio(
+        "스티커 채우기 방향",
+        options=["세로(위→아래→오른쪽)", "가로(왼→오→아래)"],
+        horizontal=True,
+        index=0,
+        key="sticker_fill_order_ui",
+    )
+    draw_grid = st.checkbox("테스트용: 격자선(테두리) 출력", value=False, key="sticker_draw_grid_ui")
+    fill_order = "column" if str(fill_label).startswith("세로") else "row"
+
+    st.caption(
+        f"총 {len(sticker_texts)}개 · 페이지당 {STICKER_PER_PAGE}칸 · 글자 {STICKER_FONT_SIZE}pt · A4 · 38.2×21.1mm · 채우기:{'세로' if fill_order=='column' else '가로'}"
+        f"{' · 격자선ON' if draw_grid else ''} (제외 {excluded_stickers}개)"
+    )
     st.download_button(
         "⬇️ 스티커용지 PDF 다운로드",
-        data=build_sticker_pdf(sticker_texts),
+        data=build_sticker_pdf(sticker_texts, fill_order=fill_order, draw_grid=draw_grid),
         file_name="스티커용지.pdf",
         mime="application/pdf",
         use_container_width=True,
     )
+
 
     # 수취인별 출력
     st.markdown("---")
