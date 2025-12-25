@@ -84,10 +84,41 @@ def now_prefix_kst() -> str:
 # PATHS / STORAGE
 # =====================================================
 # 배포환경(Render 등)에서 재시작/재배포 후에도 설정/룰/내보내기 데이터가 유지되도록,
-# 영구 저장 루트 폴더를 환경변수로 지정할 수 있게 합니다.
-# - Render Persistent Disk를 /var/data 로 마운트하고, APP_DATA_DIR=/var/data 로 설정 권장
-APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "."))
-APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+# 영구 저장 루트 폴더를 환경변수/디스크 마운트 경로로 자동 선택합니다.
+#
+# 권장(Render):
+#  - Persistent Disk mount path: /var/data
+#  - Environment Variable: APP_DATA_DIR=/var/data
+#
+# 선택 우선순위:
+#  1) APP_DATA_DIR 환경변수
+#  2) /var/data 가 존재하고 쓰기 가능하면 사용
+#  3) 현재 작업 폴더(로컬 실행용)
+_env_dir = (os.environ.get("APP_DATA_DIR") or "").strip()
+
+def _pick_writable_dir(cands: list[Path]) -> Path:
+    for p in cands:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            test = p / ".write_test"
+            with open(test, "w", encoding="utf-8") as f:
+                f.write("ok")
+            try:
+                test.unlink()
+            except Exception:
+                pass
+            return p
+        except Exception:
+            continue
+    return Path(".")
+
+_candidates: list[Path] = []
+if _env_dir:
+    _candidates.append(Path(_env_dir))
+_candidates.extend([Path("/var/data"), Path(".")])
+
+APP_DATA_DIR = _pick_writable_dir(_candidates)
+print(f"[BOOT] APP_DATA_DIR_ENV='{_env_dir}' -> USING='{APP_DATA_DIR}'")
 
 # (1) 재고관리 저장
 INVENTORY_FILE = str(APP_DATA_DIR / "inventory.csv")
@@ -117,9 +148,23 @@ TC_TEMPLATE_DEFAULT_PATH = Path("TC주문_등록양식.xlsx")
 # ✅ SmartStore 엑셀 비번
 EXCEL_PASSWORD = "0000"
 
-
 # -------------------- Export helpers (inventory snapshots) --------------------
 EXPORT_ROOT = str(APP_DATA_DIR / "exports")
+
+# -------------------- Atomic write helpers --------------------
+def _atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> None:
+    p = Path(path)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(text, encoding=encoding)
+    tmp.replace(p)
+
+
+def _atomic_write_bytes(path: str | Path, data: bytes) -> None:
+    p = Path(path)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(p)
+
 
 
 def kst_date_folder() -> str:
@@ -300,8 +345,7 @@ def load_rules_text() -> str:
 
 
 def save_rules_text(text: str) -> None:
-    with open(RULES_FILE, "w", encoding="utf-8") as f:
-        f.write(text or "")
+    _atomic_write_text(RULES_FILE, text or "", encoding="utf-8")
 
 
 def parse_rules(text: str):
@@ -530,7 +574,8 @@ def load_tc_settings() -> Dict[str, str]:
 def save_tc_settings(dawn: str, nxt: str) -> None:
     dawn = normalize_text(dawn) or TC_TYPE_DAWN_DEFAULT
     nxt = normalize_text(nxt) or TC_TYPE_NEXT_DEFAULT
-    TC_SETTINGS_PATH.write_text(
+    _atomic_write_text(
+        TC_SETTINGS_PATH,
         json.dumps({"dawn": dawn, "next": nxt}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -551,7 +596,7 @@ def default_expression_rules() -> Dict:
 
 
 def save_expression_rules(data: Dict) -> None:
-    EXPR_RULES_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(EXPR_RULES_PATH, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_expression_rules() -> Dict:
@@ -640,7 +685,7 @@ def default_mapping_rules() -> List[Dict]:
 
 
 def save_mapping_rules(rules: List[Dict]) -> None:
-    MAPPING_PATH.write_text(json.dumps(rules, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(MAPPING_PATH, json.dumps(rules, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_mapping_rules() -> List[Dict]:
@@ -1013,7 +1058,8 @@ def save_sticker_exclude(exclude: List[str]) -> None:
             continue
         out.append(s)
         seen.add(s)
-    STICKER_SETTINGS_PATH.write_text(
+    _atomic_write_text(
+        STICKER_SETTINGS_PATH,
         json.dumps({"exclude": out}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -2031,7 +2077,10 @@ def load_inventory_df() -> pd.DataFrame:
 
 
 def save_inventory_df(df: pd.DataFrame) -> None:
-    df.to_csv(INVENTORY_FILE, index=False, encoding="utf-8-sig")
+    p = Path(INVENTORY_FILE)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    df.to_csv(tmp, index=False, encoding="utf-8-sig")
+    tmp.replace(p)
 
 
 def parse_sum_to_number(total_str: str) -> float:
