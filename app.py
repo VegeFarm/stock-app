@@ -83,21 +83,27 @@ def now_prefix_kst() -> str:
 # =====================================================
 # PATHS / STORAGE
 # =====================================================
+# 배포환경(Render 등)에서 재시작/재배포 후에도 설정/룰/내보내기 데이터가 유지되도록,
+# 영구 저장 루트 폴더를 환경변수로 지정할 수 있게 합니다.
+# - Render Persistent Disk를 /var/data 로 마운트하고, APP_DATA_DIR=/var/data 로 설정 권장
+APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "."))
+APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 # (1) 재고관리 저장
-INVENTORY_FILE = "inventory.csv"
+INVENTORY_FILE = str(APP_DATA_DIR / "inventory.csv")
 
 # (2) PACK/BOX/EA 규칙(제품별 합계 계산용)
-RULES_FILE = "rules.txt"
+RULES_FILE = str(APP_DATA_DIR / "rules.txt")
 COUNT_UNITS = ["개", "통", "팩", "봉"]
 
 # (3) 2번 코드(엑셀 업로드/매칭 규칙) 데이터 저장
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = APP_DATA_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 MAPPING_PATH = DATA_DIR / "name_mappings.json"
 EXPR_RULES_PATH = DATA_DIR / "expression_rules.json"
 BACKUP_DIR = DATA_DIR / "rules_backup"
-BACKUP_DIR.mkdir(exist_ok=True)
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 # ✅ TC 설정 저장 파일 (프로그램 껐다 켜도 유지)
 TC_SETTINGS_PATH = DATA_DIR / "tc_settings.json"
@@ -111,8 +117,9 @@ TC_TEMPLATE_DEFAULT_PATH = Path("TC주문_등록양식.xlsx")
 # ✅ SmartStore 엑셀 비번
 EXCEL_PASSWORD = "0000"
 
+
 # -------------------- Export helpers (inventory snapshots) --------------------
-EXPORT_ROOT = "exports"
+EXPORT_ROOT = str(APP_DATA_DIR / "exports")
 
 
 def kst_date_folder() -> str:
