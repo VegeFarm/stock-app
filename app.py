@@ -4628,7 +4628,7 @@ def render_bulk_stock_page():
                         use_container_width=True,
                     )
                 with col_b:
-                    memo_filename = "주문내역.txt"
+                    memo_filename = "주문양식.txt"
                     st.download_button(
                         "📝 메모장으로 저장",
                         data=memo_text.encode("utf-8"),
