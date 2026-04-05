@@ -3136,10 +3136,15 @@ def render_inventory_page():
             return ""
         return _remain_bg(x)
 
-    df_styler = (
-        df_display.style
-        .applymap(_remain_bg_any, subset=["남은수량"])
-        .set_properties(subset=["상품명", "보유수량", "남은수량"], **{"font-weight": "800"})
+    _styler = df_display.style
+    if hasattr(_styler, "map"):
+        _styler = _styler.map(_remain_bg_any, subset=["남은수량"])
+    else:
+        _styler = _styler.applymap(_remain_bg_any, subset=["남은수량"])
+
+    df_styler = _styler.set_properties(
+        subset=["상품명", "보유수량", "남은수량"],
+        **{"font-weight": "800"}
     )
 
     st.markdown("### 재고표 (수정/추가/삭제 가능)")
