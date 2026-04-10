@@ -9,12 +9,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from collections import defaultdict, OrderedDict
-from typing import Optional, Tuple, List, Dict, Any
-from urllib import request as urlrequest, error as urlerror
+from typing import Optional, Tuple, List, Dict
 
 import pandas as pd
 import streamlit as st
 import openpyxl
+import requests
 
 # -------------------- Optional deps --------------------
 # Excel decrypt (SmartStore password 0000)
@@ -79,11 +79,6 @@ KST = timezone(timedelta(hours=9))  # for legacy functions
 
 def now_prefix_kst() -> str:
     return datetime.now(KST).strftime("%Y%m%d_%H%M%S")
-
-
-def today_sheet_name_kst() -> str:
-    now = datetime.now(KST_TZ)
-    return f"{now.month}.{now.day}"
 
 
 # =====================================================
@@ -154,10 +149,13 @@ TC_TEMPLATE_DEFAULT_PATH = Path("TC주문_등록양식.xlsx")
 # ✅ SmartStore 엑셀 비번
 EXCEL_PASSWORD = "0000"
 
-# ✅ 2번 코드(Apps Script 웹앱) 연동 설정
+# (4) 2번 구글시트 Apps Script 웹앱 동기화
 GOOGLE_SYNC_WEBAPP_URL = (os.environ.get("GOOGLE_SYNC_WEBAPP_URL") or "").strip()
 GOOGLE_SYNC_TOKEN = (os.environ.get("GOOGLE_SYNC_TOKEN") or "").strip()
-GOOGLE_SYNC_TIMEOUT = int((os.environ.get("GOOGLE_SYNC_TIMEOUT") or "20").strip() or "20")
+try:
+    GOOGLE_SYNC_TIMEOUT_SEC = int((os.environ.get("GOOGLE_SYNC_TIMEOUT_SEC") or "20").strip())
+except Exception:
+    GOOGLE_SYNC_TIMEOUT_SEC = 20
 
 # -------------------- Export helpers (inventory snapshots) --------------------
 EXPORT_ROOT = str(APP_DATA_DIR / "exports")
@@ -256,37 +254,9 @@ def delete_export_date(date_str: str) -> bool:
 
 
 # =====================================================
-# ✅ 제품별 합계 고정 순서(표에 항상 먼저, 위→아래 기준)
+# ✅ 고정품목 기능 사용 안 함 (현재 재고표 순서 그대로 유지)
 # =====================================================
-FIXED_PRODUCT_ORDER = [
-    "고수",
-    "공심채",
-    "그린빈",
-    "당귀잎",
-    "딜",
-    "래디쉬",
-    "로즈마리",
-    "로케트",
-    "바질",
-    "로즈잎",
-    "비타민",
-    "쌈샐러리",
-    "쌈추",
-    "애플민트",
-    "와일드",
-    "잎로메인",
-    "적겨자",
-    "적근대",
-    "적치커리",
-    "청경채",
-    "청치커리",
-    "케일",
-    "타임",
-    "통로메인",
-    "향나물",
-    "뉴그린",
-    "처빌",
-]
+FIXED_PRODUCT_ORDER: list[str] = []
 
 
 # =====================================================
@@ -2099,15 +2069,12 @@ def compute_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def sort_inventory_df(df: pd.DataFrame) -> pd.DataFrame:
+    """고정정렬 없이 현재 행 순서를 그대로 유지"""
     df = df.copy()
-    fixed_index = {name: i for i, name in enumerate(FIXED_PRODUCT_ORDER)}
-
-    def _rank(name: str) -> int:
-        return fixed_index.get(name, 10_000)
-
-    df["__rank"] = df["상품명"].apply(lambda x: _rank(str(x).strip()))
-    df = df.sort_values(by=["__rank", "상품명"], kind="mergesort").drop(columns=["__rank"])
-    return df
+    for c in INVENTORY_COLUMNS:
+        if c not in df.columns:
+            df[c] = "" if c == "상품명" else 0.0
+    return df[INVENTORY_COLUMNS].reset_index(drop=True)
 
 
 def load_inventory_df() -> pd.DataFrame:
@@ -2117,12 +2084,7 @@ def load_inventory_df() -> pd.DataFrame:
         except Exception:
             df = pd.read_csv(INVENTORY_FILE, encoding="utf-8", errors="ignore")
     else:
-        df = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
-
-    existing = set(df.get("상품명", pd.Series(dtype=str)).fillna("").astype(str).str.strip())
-    missing = [p for p in FIXED_PRODUCT_ORDER if p not in existing]
-    if missing:
-        df = pd.concat([df, pd.DataFrame({"상품명": missing})], ignore_index=True)
+        df = pd.DataFrame(columns=["상품명", "재고", "입고", "1차", "2차", "3차"])
 
     df = compute_inventory_df(df)
     df = sort_inventory_df(df)
@@ -2149,9 +2111,8 @@ def parse_sum_to_number(total_str: str) -> float:
         return 0.0
 
 
-def build_google_sync_items(sum_df_long: pd.DataFrame) -> list[dict[str, Any]]:
-    """제품별합계 df_long -> 웹앱 전송용 [{name, qty}] 목록으로 변환"""
-    items: list[dict[str, Any]] = []
+def build_sync_items_from_sum(sum_df_long: pd.DataFrame) -> list[dict]:
+    items: list[dict] = []
     if sum_df_long is None or len(sum_df_long) == 0:
         return items
 
@@ -2165,76 +2126,54 @@ def build_google_sync_items(sum_df_long: pd.DataFrame) -> list[dict[str, Any]]:
     return items
 
 
-def sync_sum_to_google_webapp(
-    sum_df_long: pd.DataFrame,
-    target_col: str,
-    add_mode: bool = False,
-    sheet_name: Optional[str] = None,
-) -> dict[str, Any]:
-    """2번 코드 Apps Script 웹앱으로 오늘 날짜 시트의 차수열에 exact match 반영 요청"""
-    if not GOOGLE_SYNC_WEBAPP_URL:
-        return {
-            "ok": False,
-            "configured": False,
-            "message": "GOOGLE_SYNC_WEBAPP_URL 환경변수가 비어 있어 2번 코드 동기화를 건너뛰었습니다.",
-        }
+def get_today_sheet_name_mdd() -> str:
+    now = datetime.now(KST_TZ)
+    return f"{now.month}.{now.day:02d}"
 
-    items = build_google_sync_items(sum_df_long)
-    if not items:
-        return {"ok": True, "configured": True, "message": "전송할 제품별합계 데이터가 없습니다.", "updated": 0}
+
+def sync_inventory_to_google_sheet(sum_df_long: pd.DataFrame, target_col: str, add_mode: bool = False) -> tuple[bool, str]:
+    if not GOOGLE_SYNC_WEBAPP_URL or not GOOGLE_SYNC_TOKEN:
+        return False, "구글시트 동기화 설정이 없어 로컬 재고표만 저장했습니다."
 
     payload = {
         "token": GOOGLE_SYNC_TOKEN,
-        "sheet_name": (sheet_name or today_sheet_name_kst()).strip(),
-        "target_col": str(target_col).strip(),
+        "sheet_name": get_today_sheet_name_mdd(),
+        "target_col": target_col,
         "add_mode": bool(add_mode),
-        "items": items,
+        "clear_target_first": not bool(add_mode),
+        "source": "stock-app",
         "sent_at": datetime.now(KST_TZ).isoformat(),
-        "source": "stock-app-main",
+        "items": build_sync_items_from_sum(sum_df_long),
     }
 
-    req = urlrequest.Request(
-        GOOGLE_SYNC_WEBAPP_URL,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"},
-        method="POST",
-    )
-
     try:
-        with urlrequest.urlopen(req, timeout=GOOGLE_SYNC_TIMEOUT) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-    except urlerror.HTTPError as e:
-        try:
-            err_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            err_body = str(e)
-        return {
-            "ok": False,
-            "configured": True,
-            "message": f"웹앱 HTTP 오류: {e.code}",
-            "detail": err_body,
-        }
+        resp = requests.post(GOOGLE_SYNC_WEBAPP_URL, json=payload, timeout=GOOGLE_SYNC_TIMEOUT_SEC)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception as e:
-        return {
-            "ok": False,
-            "configured": True,
-            "message": f"웹앱 호출 실패: {e}",
-        }
+        return False, f"구글시트 동기화 실패: {e}"
 
-    try:
-        data = json.loads(body) if body else {}
-        if isinstance(data, dict):
-            data.setdefault("ok", True)
-            data.setdefault("configured", True)
-            return data
-        return {"ok": True, "configured": True, "message": str(data)}
-    except Exception:
-        return {
-            "ok": True,
-            "configured": True,
-            "message": "웹앱 응답을 받았습니다.",
-            "raw": body,
-        }
+    if not bool(data.get("ok", False)):
+        msg = str(data.get("message", "동기화 실패"))
+        return False, f"구글시트 동기화 실패: {msg}"
+
+    if not bool(data.get("sheet_found", True)):
+        return True, f"구글시트 날짜 시트({payload['sheet_name']})가 없어 시트에는 반영하지 않았습니다."
+
+    updated = int(data.get("updated", 0) or 0)
+    not_found = data.get("not_found_names", []) or []
+    if not_found:
+        return True, f"구글시트 반영 {updated}건, 제외 {len(not_found)}건: {', '.join(map(str, not_found))}"
+    return True, f"구글시트 반영 완료! (반영 행: {updated})"
+
+
+def zero_numeric_inventory_fields(df: pd.DataFrame) -> pd.DataFrame:
+    dd = df.copy()
+    for c in ["재고", "입고", "1차", "2차", "3차"]:
+        if c not in dd.columns:
+            dd[c] = 0.0
+        dd[c] = 0.0
+    return dd
 
 
 def register_sum_to_inventory(sum_df_long: pd.DataFrame, target_col: str, add_mode: bool = False):
@@ -2249,10 +2188,13 @@ def register_sum_to_inventory(sum_df_long: pd.DataFrame, target_col: str, add_mo
 
     inv = compute_inventory_df(inv)
     inv_names = inv["상품명"].fillna("").astype(str).str.strip()
-    name_to_idx = {n: i for i, n in enumerate(inv_names)}
+    name_to_idx = {n: i for i, n in enumerate(inv_names) if n}
 
     skipped = []
     updated = 0
+
+    if not add_mode and target_col in inv.columns:
+        inv[target_col] = 0.0
 
     for _, r in sum_df_long.iterrows():
         name = str(r.get("제품명", "")).strip()
@@ -2347,22 +2289,7 @@ def compute_product_totals_from_summary(
     agg = aggregate(items)
 
     rows = []
-    fixed_set = set(FIXED_PRODUCT_ORDER)
-
-    for product in FIXED_PRODUCT_ORDER:
-        if product in agg:
-            total_str = format_total_custom(
-                product, agg[product],
-                pack_rules, box_rules, ea_rules,
-                allow_decimal_pack=allow_decimal_pack,
-                allow_decimal_box=allow_decimal_box,
-            )
-        else:
-            total_str = "0"
-        rows.append({"제품명": product, "합계": total_str})
-
-    rest = [p for p in agg.keys() if p not in fixed_set]
-    for product in sorted(rest):
+    for product in agg.keys():
         rows.append({
             "제품명": product,
             "합계": format_total_custom(
@@ -3041,39 +2968,16 @@ def render_product_totals_page():
             if do_reg:
                 sum_df = st.session_state.get("last_sum_df_long")
                 updated, skipped = register_sum_to_inventory(sum_df, target_col=target, add_mode=add_mode)
-                sync_result = sync_sum_to_google_webapp(sum_df, target_col=target, add_mode=add_mode)
+                sync_ok, sync_msg = sync_inventory_to_google_sheet(sum_df, target_col=target, add_mode=add_mode)
                 st.session_state["show_register_panel"] = False
 
                 if skipped:
                     st.warning("등록 제외(재고관리 상품명 없음): " + ", ".join(sorted(set(skipped))))
                 st.success(f"{target}에 등록 완료! (반영 행: {updated})")
-
-                if sync_result.get("ok"):
-                    sync_sheet = str(sync_result.get("sheet_name") or today_sheet_name_kst())
-                    sync_updated = sync_result.get("updated")
-                    if sync_updated is None:
-                        st.success(f"☁️ 2번 코드 동기화 완료! (대상 시트: {sync_sheet})")
-                    else:
-                        st.success(f"☁️ 2번 코드 동기화 완료! (대상 시트: {sync_sheet}, 반영 행: {sync_updated})")
-
-                    not_found = sync_result.get("not_found_names") or sync_result.get("skipped_names") or []
-                    if not_found:
-                        try:
-                            names = ", ".join(sorted({str(x).strip() for x in not_found if str(x).strip()}))
-                            if names:
-                                st.warning("2번 코드 시트에서 제외(품목명 exact match 없음): " + names)
-                        except Exception:
-                            pass
+                if sync_ok:
+                    st.info(sync_msg)
                 else:
-                    msg = str(sync_result.get("message") or "2번 코드 동기화에 실패했습니다.")
-                    detail = str(sync_result.get("detail") or "").strip()
-                    if sync_result.get("configured") is False:
-                        st.warning("☁️ 2번 코드 동기화 건너뜀: " + msg)
-                    else:
-                        st.error("☁️ 2번 코드 동기화 실패: " + msg)
-                        if detail:
-                            st.code(detail)
-
+                    st.warning(sync_msg)
                 st.info("📦 사이드바의 '재고관리'로 이동하면 확인할 수 있어요.")
 
         if Image is None and len(sum_imgs) > 1:
@@ -3333,7 +3237,7 @@ def render_inventory_page():
         st.rerun()
 
     if colB.button("↻ 초기화(0으로)", use_container_width=True):
-        base = pd.DataFrame({"상품명": FIXED_PRODUCT_ORDER})
+        base = zero_numeric_inventory_fields(df_base_new)
         base = compute_inventory_df(base)
         base = sort_inventory_df(base).reset_index(drop=True)
 
@@ -3341,7 +3245,7 @@ def render_inventory_page():
         save_inventory_df(base)
 
         st.session_state["inventory_editor_version"] = ver + 1
-        st.session_state["inventory_toast"] = "초기화 완료!"
+        st.session_state["inventory_toast"] = "현재 상품명은 유지하고 숫자만 0으로 초기화했습니다!"
         st.rerun()
 
     if colC.button("📤 내보내기", use_container_width=True):
