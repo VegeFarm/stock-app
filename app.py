@@ -9,7 +9,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from collections import defaultdict, OrderedDict
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
+from urllib import request as urlrequest, error as urlerror
 
 import pandas as pd
 import streamlit as st
@@ -80,6 +81,11 @@ def now_prefix_kst() -> str:
     return datetime.now(KST).strftime("%Y%m%d_%H%M%S")
 
 
+def today_sheet_name_kst() -> str:
+    now = datetime.now(KST_TZ)
+    return f"{now.month}.{now.day}"
+
+
 # =====================================================
 # PATHS / STORAGE
 # =====================================================
@@ -147,6 +153,11 @@ TC_TEMPLATE_DEFAULT_PATH = Path("TC주문_등록양식.xlsx")
 
 # ✅ SmartStore 엑셀 비번
 EXCEL_PASSWORD = "0000"
+
+# ✅ 2번 코드(Apps Script 웹앱) 연동 설정
+GOOGLE_SYNC_WEBAPP_URL = (os.environ.get("GOOGLE_SYNC_WEBAPP_URL") or "").strip()
+GOOGLE_SYNC_TOKEN = (os.environ.get("GOOGLE_SYNC_TOKEN") or "").strip()
+GOOGLE_SYNC_TIMEOUT = int((os.environ.get("GOOGLE_SYNC_TIMEOUT") or "20").strip() or "20")
 
 # -------------------- Export helpers (inventory snapshots) --------------------
 EXPORT_ROOT = str(APP_DATA_DIR / "exports")
@@ -2138,6 +2149,94 @@ def parse_sum_to_number(total_str: str) -> float:
         return 0.0
 
 
+def build_google_sync_items(sum_df_long: pd.DataFrame) -> list[dict[str, Any]]:
+    """제품별합계 df_long -> 웹앱 전송용 [{name, qty}] 목록으로 변환"""
+    items: list[dict[str, Any]] = []
+    if sum_df_long is None or len(sum_df_long) == 0:
+        return items
+
+    for _, r in sum_df_long.iterrows():
+        name = str(r.get("제품명", "")).strip()
+        if not name:
+            continue
+        qty = parse_sum_to_number(str(r.get("합계", "0")))
+        items.append({"name": name, "qty": float(qty)})
+
+    return items
+
+
+def sync_sum_to_google_webapp(
+    sum_df_long: pd.DataFrame,
+    target_col: str,
+    add_mode: bool = False,
+    sheet_name: Optional[str] = None,
+) -> dict[str, Any]:
+    """2번 코드 Apps Script 웹앱으로 오늘 날짜 시트의 차수열에 exact match 반영 요청"""
+    if not GOOGLE_SYNC_WEBAPP_URL:
+        return {
+            "ok": False,
+            "configured": False,
+            "message": "GOOGLE_SYNC_WEBAPP_URL 환경변수가 비어 있어 2번 코드 동기화를 건너뛰었습니다.",
+        }
+
+    items = build_google_sync_items(sum_df_long)
+    if not items:
+        return {"ok": True, "configured": True, "message": "전송할 제품별합계 데이터가 없습니다.", "updated": 0}
+
+    payload = {
+        "token": GOOGLE_SYNC_TOKEN,
+        "sheet_name": (sheet_name or today_sheet_name_kst()).strip(),
+        "target_col": str(target_col).strip(),
+        "add_mode": bool(add_mode),
+        "items": items,
+        "sent_at": datetime.now(KST_TZ).isoformat(),
+        "source": "stock-app-main",
+    }
+
+    req = urlrequest.Request(
+        GOOGLE_SYNC_WEBAPP_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+
+    try:
+        with urlrequest.urlopen(req, timeout=GOOGLE_SYNC_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urlerror.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = str(e)
+        return {
+            "ok": False,
+            "configured": True,
+            "message": f"웹앱 HTTP 오류: {e.code}",
+            "detail": err_body,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "configured": True,
+            "message": f"웹앱 호출 실패: {e}",
+        }
+
+    try:
+        data = json.loads(body) if body else {}
+        if isinstance(data, dict):
+            data.setdefault("ok", True)
+            data.setdefault("configured", True)
+            return data
+        return {"ok": True, "configured": True, "message": str(data)}
+    except Exception:
+        return {
+            "ok": True,
+            "configured": True,
+            "message": "웹앱 응답을 받았습니다.",
+            "raw": body,
+        }
+
+
 def register_sum_to_inventory(sum_df_long: pd.DataFrame, target_col: str, add_mode: bool = False):
     """제품별합계(df_long)를 재고관리의 1차/2차/3차 중 하나로 등록(상품명이 있는 것만)"""
     if sum_df_long is None or len(sum_df_long) == 0:
@@ -2942,11 +3041,39 @@ def render_product_totals_page():
             if do_reg:
                 sum_df = st.session_state.get("last_sum_df_long")
                 updated, skipped = register_sum_to_inventory(sum_df, target_col=target, add_mode=add_mode)
+                sync_result = sync_sum_to_google_webapp(sum_df, target_col=target, add_mode=add_mode)
                 st.session_state["show_register_panel"] = False
 
                 if skipped:
                     st.warning("등록 제외(재고관리 상품명 없음): " + ", ".join(sorted(set(skipped))))
                 st.success(f"{target}에 등록 완료! (반영 행: {updated})")
+
+                if sync_result.get("ok"):
+                    sync_sheet = str(sync_result.get("sheet_name") or today_sheet_name_kst())
+                    sync_updated = sync_result.get("updated")
+                    if sync_updated is None:
+                        st.success(f"☁️ 2번 코드 동기화 완료! (대상 시트: {sync_sheet})")
+                    else:
+                        st.success(f"☁️ 2번 코드 동기화 완료! (대상 시트: {sync_sheet}, 반영 행: {sync_updated})")
+
+                    not_found = sync_result.get("not_found_names") or sync_result.get("skipped_names") or []
+                    if not_found:
+                        try:
+                            names = ", ".join(sorted({str(x).strip() for x in not_found if str(x).strip()}))
+                            if names:
+                                st.warning("2번 코드 시트에서 제외(품목명 exact match 없음): " + names)
+                        except Exception:
+                            pass
+                else:
+                    msg = str(sync_result.get("message") or "2번 코드 동기화에 실패했습니다.")
+                    detail = str(sync_result.get("detail") or "").strip()
+                    if sync_result.get("configured") is False:
+                        st.warning("☁️ 2번 코드 동기화 건너뜀: " + msg)
+                    else:
+                        st.error("☁️ 2번 코드 동기화 실패: " + msg)
+                        if detail:
+                            st.code(detail)
+
                 st.info("📦 사이드바의 '재고관리'로 이동하면 확인할 수 있어요.")
 
         if Image is None and len(sum_imgs) > 1:
