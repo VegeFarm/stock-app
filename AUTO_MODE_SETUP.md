@@ -27,3 +27,9 @@
 - 답장은 반드시 한 메시지로 보내세요.
 - 형식은 번호 수량 입니다.
 - 수동모드는 기존과 동일합니다.
+
+
+## 네이버 토큰 인증 주의
+- 네이버 커머스 API는 `client_secret` 원문을 바로 보내지 않습니다.
+- 앱은 `client_id_timestamp` 값을 bcrypt 해시 후 Base64 인코딩한 `client_secret_sign`을 만들어 토큰을 요청합니다.
+- 토큰 요청 파라미터에는 `timestamp`, `client_secret_sign`, `type=SELF`가 포함되어야 합니다.

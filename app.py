@@ -4039,6 +4039,11 @@ def render_bulk_stock_page():
     import json
     import os
     import hashlib
+    import base64
+    try:
+        import bcrypt
+    except Exception:
+        bcrypt = None
     from dataclasses import dataclass
     from datetime import datetime
     import time
@@ -4936,6 +4941,19 @@ def render_bulk_stock_page():
 
         if not NAVER_COMMERCE_CLIENT_ID or not NAVER_COMMERCE_CLIENT_SECRET:
             raise RuntimeError("네이버 커머스 API 환경변수가 비어 있습니다.")
+        if bcrypt is None:
+            raise RuntimeError("bcrypt 라이브러리가 없어 네이버 토큰 전자서명을 만들 수 없습니다. requirements.txt에 bcrypt를 추가하고 재배포해 주세요.")
+
+        timestamp_ms = int(time.time() * 1000)
+        password = f"{NAVER_COMMERCE_CLIENT_ID}_{timestamp_ms}"
+        try:
+            hashed = bcrypt.hashpw(password.encode("utf-8"), NAVER_COMMERCE_CLIENT_SECRET.encode("utf-8"))
+        except ValueError as e:
+            raise RuntimeError(
+                "NAVER_COMMERCE_CLIENT_SECRET 값이 네이버 커머스 API용 bcrypt salt 형식이 아닙니다. "
+                f"현재 secret으로 전자서명을 만들 수 없습니다: {e}"
+            )
+        client_secret_sign = base64.b64encode(hashed).decode("utf-8")
 
         url = f"{NAVER_COMMERCE_BASE_URL}/v1/oauth2/token"
         resp = requests.post(
@@ -4944,7 +4962,9 @@ def render_bulk_stock_page():
             data={
                 "grant_type": "client_credentials",
                 "client_id": NAVER_COMMERCE_CLIENT_ID,
-                "client_secret": NAVER_COMMERCE_CLIENT_SECRET,
+                "timestamp": str(timestamp_ms),
+                "client_secret_sign": client_secret_sign,
+                "type": "SELF",
             },
             timeout=30,
         )
@@ -4954,7 +4974,7 @@ def render_bulk_stock_page():
         token = data.get("access_token")
         if not token:
             raise RuntimeError(f"네이버 토큰 응답에 access_token 이 없습니다: {data}")
-        expires_in = int(data.get("expires_in") or 3600)
+        expires_in = int(data.get("expires_in") or 10800)
         st.session_state["bulk_naver_token_cache"] = {"access_token": token, "expires_at": now_ts + expires_in}
         return token
 

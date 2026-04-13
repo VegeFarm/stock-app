@@ -13,7 +13,4 @@ pytesseract
 pillow
 msoffcrypto-tool>=5.0
 xlwt
-
-
-
-
+bcrypt
