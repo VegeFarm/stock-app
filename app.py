@@ -5136,7 +5136,7 @@ def render_bulk_stock_page():
     def build_multi_update_payload(df_changes: pd.DataFrame) -> Dict[str, Any]:
         items_map: Dict[int, int] = {}
         if df_changes is None or df_changes.empty:
-            return {"items": []}
+            return {"items": [], "multiProductUpdateRequestVos": []}
 
         for _, row in df_changes.iterrows():
             try:
@@ -5154,17 +5154,22 @@ def render_bulk_stock_page():
             items_map[origin_no] = qty
 
         items = [{"originProductNo": origin_no, "stockQuantity": qty} for origin_no, qty in items_map.items()]
-        return {"items": items}
+        return {
+            "items": items,
+            "multiProductUpdateRequestVos": items,
+        }
 
     def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
         payload = build_multi_update_payload(df_changes)
-        if not payload.get("items"):
+        items = payload.get("items") or []
+        request_vos = payload.get("multiProductUpdateRequestVos") or []
+        if not items and not request_vos:
             return {"sent": 0, "response": {"message": "변경 대상 없음"}, "payload": payload}
         data = _relay_request("/naver/stock/update", json_body=payload)
         try:
-            sent_count = int(data.get("sent_count") or len(payload.get("items") or []))
+            sent_count = int(data.get("sent_count") or len(items) or len(request_vos))
         except Exception:
-            sent_count = len(payload.get("items") or [])
+            sent_count = len(items) or len(request_vos)
         return {"sent": sent_count, "response": data.get("data") or data, "payload": payload, "relay": data}
 
     def _telegram_request(method: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
