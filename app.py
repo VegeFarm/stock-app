@@ -486,6 +486,16 @@ def fmt_qty(x):
         return x
 
 
+def fmt_qty_no_zero(x):
+    try:
+        x = float(x)
+        if abs(x) < 1e-9:
+            return "0"
+        return str(int(x)) if x.is_integer() else str(x)
+    except Exception:
+        return str(x)
+
+
 def _as_int_qty(v) -> int:
     try:
         f = float(v)
