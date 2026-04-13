@@ -5201,6 +5201,29 @@ def render_bulk_stock_page():
             lines.append(f"응답: {resp.get('message')}")
         return "\n".join(lines)
 
+    def telegram_send_message(text: str) -> Dict[str, Any]:
+        return send_telegram_message(text)
+
+    def telegram_get_updates(offset: int = 0) -> List[Dict[str, Any]]:
+        data = _telegram_request("getUpdates", params={"timeout": 0, "offset": int(offset)})
+        return data.get("result") or []
+
+    def _get_latest_update_id() -> int:
+        offset = int(st.session_state.get("bulk_tg_update_offset") or 0)
+        updates = telegram_get_updates(offset=offset + 1)
+        max_update_id = offset
+        for item in updates:
+            try:
+                update_id = int(item.get("update_id") or 0)
+            except Exception:
+                continue
+            max_update_id = max(max_update_id, update_id)
+        st.session_state["bulk_tg_update_offset"] = max_update_id
+        return max_update_id
+
+    def parse_first_reply_message(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
+        return parse_number_qty_reply(text, max_index)
+
     # ============================
     # UI
     # ============================
