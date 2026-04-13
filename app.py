@@ -5180,83 +5180,83 @@ def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
         sent_count = len(payload.get("items") or [])
     return {"sent": sent_count, "response": data.get("data") or data, "payload": payload, "relay": data}
 
-def _telegram_request(method: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN 환경변수가 비어 있습니다.")
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
-    resp = requests.post(url, params=params, json=json_body, timeout=30)
-    data = _safe_json(resp)
-    if resp.status_code >= 400 or not isinstance(data, dict) or not data.get("ok", False):
-        raise RuntimeError(f"텔레그램 API 실패: {method} / {resp.status_code} / {data}")
-    return data
+    def _telegram_request(method: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not TELEGRAM_BOT_TOKEN:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN 환경변수가 비어 있습니다.")
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+        resp = requests.post(url, params=params, json=json_body, timeout=30)
+        data = _safe_json(resp)
+        if resp.status_code >= 400 or not isinstance(data, dict) or not data.get("ok", False):
+            raise RuntimeError(f"텔레그램 API 실패: {method} / {resp.status_code} / {data}")
+        return data
 
-def telegram_send_message(text: str) -> Dict[str, Any]:
-    return _telegram_request("sendMessage", json_body={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+    def telegram_send_message(text: str) -> Dict[str, Any]:
+        return _telegram_request("sendMessage", json_body={"chat_id": TELEGRAM_CHAT_ID, "text": text})
 
-def telegram_get_updates(offset: Optional[int] = None) -> List[Dict[str, Any]]:
-    params = {"timeout": 0, "limit": 100}
-    if offset is not None:
-        params["offset"] = int(offset)
-    data = _telegram_request("getUpdates", params=params)
-    result = data.get("result") or []
-    return result if isinstance(result, list) else []
+    def telegram_get_updates(offset: Optional[int] = None) -> List[Dict[str, Any]]:
+        params = {"timeout": 0, "limit": 100}
+        if offset is not None:
+            params["offset"] = int(offset)
+        data = _telegram_request("getUpdates", params=params)
+        result = data.get("result") or []
+        return result if isinstance(result, list) else []
 
-def _get_latest_update_id() -> int:
-    updates = telegram_get_updates()
-    max_id = 0
-    for upd in updates:
-        try:
-            max_id = max(max_id, int(upd.get("update_id") or 0))
-        except Exception:
-            pass
-    return max_id
+    def _get_latest_update_id() -> int:
+        updates = telegram_get_updates()
+        max_id = 0
+        for upd in updates:
+            try:
+                max_id = max(max_id, int(upd.get("update_id") or 0))
+            except Exception:
+                pass
+        return max_id
 
-def build_current_stock_message(current_names: List[str], stock_map: Dict[str, str]) -> str:
-    lines = ["[현재 재고 수량]"]
-    for i, name in enumerate(current_names, start=1):
-        lines.append(f"{i}. {name} {stock_map.get(name, '0')}")
-    return "\n".join(lines)
+    def build_current_stock_message(current_names: List[str], stock_map: Dict[str, str]) -> str:
+        lines = ["[현재 재고 수량]"]
+        for i, name in enumerate(current_names, start=1):
+            lines.append(f"{i}. {name} {stock_map.get(name, '0')}")
+        return "\n".join(lines)
 
-def parse_first_reply_message(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
-    if text is None:
-        return False, {}, "메시지가 비어 있습니다."
-    parsed: Dict[int, float] = {}
-    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
-    if not lines:
-        return False, {}, "메시지가 비어 있습니다."
-    for i, line in enumerate(lines, start=1):
-        m = re.fullmatch(r"(\d+)\s+([0-9]+(?:\.[0-9]+)?)", line)
-        if not m:
-            return False, {}, f"{i}번째 줄 형식이 올바르지 않습니다. 예: 1 5"
-        idx = int(m.group(1))
-        qty = float(m.group(2))
-        if idx < 1 or idx > max_index:
-            return False, {}, f"{i}번째 줄 상품 번호가 범위를 벗어났습니다: {idx}"
-        if qty < 0:
-            return False, {}, f"{i}번째 줄 수량은 음수일 수 없습니다."
-        parsed[idx] = parsed.get(idx, 0.0) + qty
-    return True, parsed, ""
+    def parse_first_reply_message(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
+        if text is None:
+            return False, {}, "메시지가 비어 있습니다."
+        parsed: Dict[int, float] = {}
+        lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+        if not lines:
+            return False, {}, "메시지가 비어 있습니다."
+        for i, line in enumerate(lines, start=1):
+            m = re.fullmatch(r"(\d+)\s+([0-9]+(?:\.[0-9]+)?)", line)
+            if not m:
+                return False, {}, f"{i}번째 줄 형식이 올바르지 않습니다. 예: 1 5"
+            idx = int(m.group(1))
+            qty = float(m.group(2))
+            if idx < 1 or idx > max_index:
+                return False, {}, f"{i}번째 줄 상품 번호가 범위를 벗어났습니다: {idx}"
+            if qty < 0:
+                return False, {}, f"{i}번째 줄 수량은 음수일 수 없습니다."
+            parsed[idx] = parsed.get(idx, 0.0) + qty
+        return True, parsed, ""
 
-def build_auto_inputs(current_names: List[str], parsed_reply: Dict[int, float]) -> Dict[str, float]:
-    out: Dict[str, float] = {name: 0.0 for name in current_names}
-    for idx, qty in parsed_reply.items():
-        if 1 <= idx <= len(current_names):
-            out[current_names[idx - 1]] = float(qty)
-    return out
+    def build_auto_inputs(current_names: List[str], parsed_reply: Dict[int, float]) -> Dict[str, float]:
+        out: Dict[str, float] = {name: 0.0 for name in current_names}
+        for idx, qty in parsed_reply.items():
+            if 1 <= idx <= len(current_names):
+                out[current_names[idx - 1]] = float(qty)
+        return out
 
-def build_auto_memo_text(current_names: List[str], inputs: Dict[str, float]) -> str:
-    return "\n".join([f"{name} - {fmt_qty_for_memo(float(inputs.get(name, 0.0) or 0.0))}" for name in current_names])
+    def build_auto_memo_text(current_names: List[str], inputs: Dict[str, float]) -> str:
+        return "\n".join([f"{name} - {fmt_qty_for_memo(float(inputs.get(name, 0.0) or 0.0))}" for name in current_names])
 
-def summarize_auto_result(sent_count: int, df_changes: pd.DataFrame, df_missing: pd.DataFrame, api_result: Dict[str, Any]) -> str:
-    changed_count = 0 if df_changes is None else int(len(df_changes))
-    missing_count = 0 if df_missing is None else int(len(df_missing))
-    lines = ["[자동 재고 반영 완료]", f"전송건수 {sent_count}", f"실제 변경행 {changed_count}"]
-    if missing_count > 0:
-        lines.append(f"미적용 규칙 {missing_count}")
-    resp = api_result.get("response") if isinstance(api_result, dict) else None
-    if isinstance(resp, dict) and resp.get("message"):
-        lines.append(f"응답: {resp.get('message')}")
-    return "\n".join(lines)
+    def summarize_auto_result(sent_count: int, df_changes: pd.DataFrame, df_missing: pd.DataFrame, api_result: Dict[str, Any]) -> str:
+        changed_count = 0 if df_changes is None else int(len(df_changes))
+        missing_count = 0 if df_missing is None else int(len(df_missing))
+        lines = ["[자동 재고 반영 완료]", f"전송건수 {sent_count}", f"실제 변경행 {changed_count}"]
+        if missing_count > 0:
+            lines.append(f"미적용 규칙 {missing_count}")
+        resp = api_result.get("response") if isinstance(api_result, dict) else None
+        if isinstance(resp, dict) and resp.get("message"):
+            lines.append(f"응답: {resp.get('message')}")
+        return "\n".join(lines)
 
 # ============================
 # UI
