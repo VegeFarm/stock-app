@@ -4448,71 +4448,57 @@ def render_bulk_stock_page():
         return s if s else "0"
 
 
-    def compute_stock_display_map(xlsx_bytes: bytes, cfg: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Build display stock totals per base product using **규칙관리 키워드**를 참고하여 계산합니다.
 
-        - 각 기준상품(base)에 대해 규칙(키워드)을 이용해 옵션 단위를 파악합니다.
-          예) '1kg', '500g', '100g' -> kg(합산),  '5팩' -> 팩,  '6통' -> 통
-        - 엑셀의 각 행(상품명)을 규칙 키워드와 매칭하여, 재고수량 * (옵션 단위 수량) 를 합산합니다.
-          예) 양상추6통:3개 + 양상추1통:3개 => 3*6 + 3*1 = 21통
-
-        Stock 없는 경우는 '0'으로 표시합니다.
-        """
-        inv_col = cfg.get("inventory_column", "재고수량")
-        name_col = cfg.get("name_column", "상품명")
-        recog_logic = _get_recognition_logic(cfg)
-
-        wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
-        ws = wb.active
-        header_row, name_idx, inv_idx = find_header_row_and_columns(ws, name_col=name_col, inv_col=inv_col)
-
-        products = cfg.get("products", []) or []
+    def _get_base_keyword_map(cfg: Dict[str, Any]) -> Dict[str, str]:
         base_kw: Dict[str, str] = {}
-        for p in products:
+        for p in cfg.get("products", []) or []:
             bn = str(p.get("name", "")).strip()
             kw = str(p.get("keyword") or p.get("name") or "").strip()
             if bn:
                 base_kw[bn] = kw or bn
+        return base_kw
 
-        bases_sorted = sorted([(bn, base_kw.get(bn, bn)) for bn in base_kw.keys()], key=lambda x: len(str(x[1] or "")), reverse=True)
+
+    def _scoped_rule_tokens(base_keyword: str, rule_keyword: str) -> List[str]:
+        base_keyword = str(base_keyword or "").strip()
+        rule_keyword = str(rule_keyword or "").strip()
+        if not rule_keyword:
+            return []
+        if not base_keyword:
+            return [rule_keyword]
+        if base_keyword in rule_keyword:
+            return [rule_keyword]
+        return [base_keyword, rule_keyword]
+
+
+    def _build_display_rule_matchers(cfg: Dict[str, Any]):
+        recog_logic = _get_recognition_logic(cfg)
+        base_kw = _get_base_keyword_map(cfg)
+        bases_sorted = sorted(
+            [(bn, base_kw.get(bn, bn)) for bn in base_kw.keys()],
+            key=lambda x: len(str(x[1] or "")),
+            reverse=True,
+        )
 
         rules_map = cfg.get("rules", {}) or {}
-
-        def _scoped_tokens(base_keyword: str, rule_keyword: str) -> List[str]:
-            base_keyword = str(base_keyword or "").strip()
-            rule_keyword = str(rule_keyword or "").strip()
-            if not rule_keyword:
-                return []
-            if not base_keyword:
-                return [rule_keyword]
-            # If user already typed full keyword incl base keyword, treat as absolute substring match
-            if base_keyword in rule_keyword:
-                return [rule_keyword]
-            # Otherwise require BOTH base keyword and rule keyword
-            return [base_keyword, rule_keyword]
-
-        # Build matchers from rules (per base)
         matchers_by_base: Dict[str, List[Dict[str, Any]]] = {}
         unit_pref: Dict[str, str] = {}
-        unit_seen: Dict[str, str] = {}
 
         for bn, bkw in bases_sorted:
             rs = rules_map.get(bn, []) or []
             ms: List[Dict[str, Any]] = []
-
             unit_counts: Dict[str, int] = {}
+
             for i, r in enumerate(rs):
                 rr = Rule.from_dict(r)
                 if not rr.keyword:
                     continue
 
-                tokens = _scoped_tokens(bkw, rr.keyword)
+                tokens = _scoped_rule_tokens(bkw, rr.keyword)
                 if not tokens:
                     continue
 
                 factor, unit = _parse_factor_and_unit(rr.keyword, recog_logic)
-
                 ms.append(
                     {
                         "tokens": tokens,
@@ -4522,18 +4508,15 @@ def render_bulk_stock_page():
                         "order": i,
                     }
                 )
-
                 if unit:
                     unit_counts[unit] = unit_counts.get(unit, 0) + 1
 
-            # Sort by specificity (longer/ more tokens first)
             ms.sort(
                 key=lambda m: (sum(len(t) for t in m["tokens"]), len(m["tokens"]), len(m["keyword"])),
                 reverse=True,
             )
             matchers_by_base[bn] = ms
 
-            # Preferred unit: kg wins if any kg/g exists; else most frequent unit in rules
             if unit_counts.get("kg", 0) > 0:
                 unit_pref[bn] = "kg"
             elif unit_counts:
@@ -4541,19 +4524,27 @@ def render_bulk_stock_page():
             else:
                 unit_pref[bn] = ""
 
+        return recog_logic, bases_sorted, matchers_by_base, unit_pref
+
+
+    def _build_stock_display_map_from_named_rows(named_rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str, str]:
+        """
+        수동/자동 공용 재고 표시 계산.
+        named_rows: [{"name": "실제상품명", "stockQuantity": 3}, ...]
+        규칙관리/인식로직을 그대로 사용해 상품별 표시 재고를 계산합니다.
+        """
+        recog_logic, bases_sorted, matchers_by_base, unit_pref = _build_display_rule_matchers(cfg)
         totals: Dict[str, Decimal] = {}
+        unit_seen: Dict[str, str] = {}
 
         def _match_tokens(tokens: List[str], name_str: str) -> bool:
             return bool(tokens) and all((t in name_str) for t in tokens)
 
-        for r in range(header_row + 1, ws.max_row + 1):
-            name_val = ws.cell(r, name_idx).value
-            if name_val is None or str(name_val).strip() == "":
+        for row in named_rows or []:
+            name_str = str(row.get("name") or "").strip()
+            if not name_str:
                 continue
 
-            name_str = str(name_val)
-
-            # determine base product by base keyword
             base_name = None
             for bn, kw in bases_sorted:
                 if kw and kw in name_str:
@@ -4562,11 +4553,10 @@ def render_bulk_stock_page():
             if base_name is None:
                 continue
 
-            inv_qty = _cell_to_decimal(ws.cell(r, inv_idx).value)
+            inv_qty = _cell_to_decimal(row.get("stockQuantity"))
             if inv_qty == 0:
                 continue
 
-            # 1) Try rules-based matching first
             chosen = None
             for m in matchers_by_base.get(base_name, []):
                 if _match_tokens(m["tokens"], name_str):
@@ -4578,21 +4568,16 @@ def render_bulk_stock_page():
                 factor = chosen["factor"]
                 unit = chosen["unit"]
             else:
-                # ✅ 규칙이 있는 기준상품은 "규칙에 매칭되는 옵션"만 합산 (단위 혼합 방지)
-                # 규칙이 있는데 어떤 키워드에도 안 걸리면, 해당 행은 재고 합산에서 제외합니다.
                 if has_rules and chosen is None:
                     continue
-                # 2) Fallback: parse from actual name (kg/g/팩/봉/통/개/박스)
                 factor, unit = _parse_factor_and_unit(name_str, recog_logic)
 
-            # Track unit seen (if rules did not define a preferred unit)
             pref = unit_pref.get(base_name, "") or ""
             if pref:
                 unit_seen[base_name] = pref
             elif unit:
                 unit_seen[base_name] = unit_seen.get(base_name) or unit
 
-            # Sum: inv_qty * factor (factor already normalized: g -> kg)
             totals[base_name] = totals.get(base_name, Decimal("0")) + (inv_qty * factor)
 
         out: Dict[str, str] = {}
@@ -4610,6 +4595,33 @@ def render_bulk_stock_page():
                 out[bn] = f"{s}{unit}" if unit else s
 
         return out
+
+
+    def compute_stock_display_map(xlsx_bytes: bytes, cfg: Dict[str, Any]) -> Dict[str, str]:
+        """
+        업로드한 엑셀 기준으로 규칙관리/인식로직을 반영한 표시 재고를 계산합니다.
+        자동 실행도 동일한 계산식을 사용합니다.
+        """
+        inv_col = cfg.get("inventory_column", "재고수량")
+        name_col = cfg.get("name_column", "상품명")
+
+        wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+        ws = wb.active
+        header_row, name_idx, inv_idx = find_header_row_and_columns(ws, name_col=name_col, inv_col=inv_col)
+
+        named_rows: List[Dict[str, Any]] = []
+        for r in range(header_row + 1, ws.max_row + 1):
+            name_val = ws.cell(r, name_idx).value
+            if name_val is None or str(name_val).strip() == "":
+                continue
+            named_rows.append(
+                {
+                    "name": str(name_val),
+                    "stockQuantity": ws.cell(r, inv_idx).value,
+                }
+            )
+
+        return _build_stock_display_map_from_named_rows(named_rows, cfg)
 
 
     # ----------------------------
@@ -5021,88 +5033,127 @@ def render_bulk_stock_page():
             raise RuntimeError("중계서버를 통해 받은 네이버 상품 조회 결과가 없습니다. NAVER_PRODUCT_SEARCH_BODY 또는 중계서버 응답을 확인해 주세요.")
         return df.drop_duplicates(subset=["originProductNo", "channelProductNo", "name"]).reset_index(drop=True)
 
+
     def compute_stock_display_map_from_df(df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, str]:
-        product_display_map: Dict[str, str] = {}
+        named_rows: List[Dict[str, Any]] = []
         if df_products is None or df_products.empty:
-            return product_display_map
+            return _build_stock_display_map_from_named_rows(named_rows, cfg)
+
         for _, row in df_products.iterrows():
+            actual_name = str(row.get("name") or row.get("실제상품명") or "").strip()
+            if not actual_name:
+                continue
+            qty_raw = row.get("stockQuantity", row.get("현재재고", row.get("재고수량", 0)))
+            named_rows.append({"name": actual_name, "stockQuantity": qty_raw})
+
+        return _build_stock_display_map_from_named_rows(named_rows, cfg)
+
+
+    def apply_actions_to_products_df(df_products: pd.DataFrame, cfg: Dict[str, Any], inputs: Dict[str, float]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        자동 실행용: 수동 엑셀 적용과 동일한 build_actions() 규칙 결과를
+        네이버 실시간 상품 목록 DataFrame에 적용합니다.
+        """
+        df2 = df_products.copy() if df_products is not None else pd.DataFrame()
+        if df2.empty:
+            return df2, pd.DataFrame(), pd.DataFrame()
+
+        if "name" not in df2.columns:
+            if "실제상품명" in df2.columns:
+                df2["name"] = df2["실제상품명"]
+            else:
+                df2["name"] = ""
+        if "stockQuantity" not in df2.columns:
+            if "현재재고" in df2.columns:
+                df2["stockQuantity"] = df2["현재재고"]
+            else:
+                df2["stockQuantity"] = 0
+
+        actions, df_missing = build_actions(cfg, inputs)
+        changes: List[Dict[str, Any]] = []
+
+        def _match_action(a: Dict[str, Any], name_str: str) -> bool:
+            toks = a.get("match_tokens") or []
+            return bool(toks) and all((t in name_str) for t in toks)
+
+        for i, row in df2.iterrows():
             actual_name = str(row.get("name") or "").strip()
             if not actual_name:
                 continue
-            for p in cfg.get("products", []):
-                display_name = str(p.get("name") or "").strip()
-                if not display_name:
-                    continue
-                pattern = str(p.get("pattern") or p.get("keyword") or display_name).strip()
-                if not pattern:
-                    continue
-                if pattern in actual_name:
-                    qty = float(row.get("stockQuantity") or 0)
-                    product_display_map[display_name] = fmt_qty_no_zero(qty)
-                    break
-        return product_display_map
+
+            matched = [a for a in actions if _match_action(a, actual_name)]
+            if not matched:
+                continue
+
+            delta = sum(float(a.get("delta") or 0.0) for a in matched)
+            if abs(delta) < 1e-12:
+                continue
+
+            before_qty = to_number(row.get("stockQuantity"))
+            after_qty = before_qty + delta
+            df2.at[i, "stockQuantity"] = after_qty
+
+            origin_no = row.get("originProductNo")
+            try:
+                origin_no = int(origin_no) if origin_no is not None and str(origin_no).strip() != "" else None
+            except Exception:
+                origin_no = None
+
+            changes.append(
+                {
+                    "상품명": actual_name,
+                    "기존재고": before_qty,
+                    "증감": delta,
+                    "최종재고": after_qty,
+                    "매칭키워드": ", ".join([str(a.get("display") or " & ".join(a.get("match_tokens", []))) for a in matched]),
+                    "원천상품": ", ".join(sorted({b for a in matched for b in a.get("bases", [])})),
+                    "originProductNo": origin_no,
+                    "channelProductNo": row.get("channelProductNo"),
+                    "실제상품명": actual_name,
+                }
+            )
+
+        return df2, pd.DataFrame(changes), df_missing
+
 
     def apply_auto_stock_to_df(df_work: pd.DataFrame, df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        df2 = df_work.copy()
-        current_rows = []
-        for _, row in df_products.iterrows():
-            current_rows.append({
-                "originProductNo": row.get("originProductNo"),
-                "channelProductNo": row.get("channelProductNo"),
-                "실제상품명": row.get("name"),
-                "현재재고": float(row.get("stockQuantity") or 0),
-            })
-        current_df = pd.DataFrame(current_rows)
-        changes: List[Dict[str, Any]] = []
-        missing: List[Dict[str, Any]] = []
+        """
+        하위 호환용 래퍼. 현재 자동 모드는 apply_actions_to_products_df()를 사용합니다.
+        """
+        inputs: Dict[str, float] = {}
+        if df_work is not None and not df_work.empty:
+            for _, work_row in df_work.iterrows():
+                product = str(work_row.get("상품") or "").strip()
+                if not product:
+                    continue
+                try:
+                    inputs[product] = float(work_row.get("입력수량") or 0.0)
+                except Exception:
+                    inputs[product] = 0.0
+        return apply_actions_to_products_df(df_products, cfg, inputs)
 
-        for i, work_row in df2.iterrows():
-            product = str(work_row.get("상품") or "").strip()
-            try:
-                input_qty = float(work_row.get("입력수량") or 0)
-            except Exception:
-                input_qty = 0.0
-            if input_qty <= 0:
-                continue
-            cfg_row = None
-            for p in cfg.get("products", []):
-                if str(p.get("name") or "").strip() == product:
-                    cfg_row = p
-                    break
-            pattern = str((cfg_row or {}).get("pattern") or (cfg_row or {}).get("keyword") or product).strip()
-            matched = current_df[current_df["실제상품명"].astype(str).str.contains(re.escape(pattern), na=False)] if pattern else current_df.iloc[0:0]
-            if matched.empty:
-                missing.append({"상품": product, "패턴": pattern, "사유": "매칭 실패"})
-                continue
-            target = matched.iloc[0]
-            before_qty = float(target.get("현재재고") or 0)
-            after_qty = before_qty + input_qty
-            df2.at[i, "재고수량"] = fmt_qty_no_zero(after_qty)
-            changes.append({
-                "상품": product,
-                "입력수량": input_qty,
-                "현재재고": before_qty,
-                "최종재고": after_qty,
-                "originProductNo": int(target.get("originProductNo")),
-                "channelProductNo": target.get("channelProductNo"),
-                "실제상품명": str(target.get("실제상품명") or ""),
-                "패턴": pattern,
-            })
-        return df2, pd.DataFrame(changes), pd.DataFrame(missing)
 
     def build_multi_update_payload(df_changes: pd.DataFrame) -> Dict[str, Any]:
-        items: List[Dict[str, Any]] = []
+        items_map: Dict[int, int] = {}
         if df_changes is None or df_changes.empty:
             return {"items": []}
+
         for _, row in df_changes.iterrows():
             try:
-                qty = int(round(float(row.get("최종재고", 0))))
                 origin_no = int(row.get("originProductNo"))
             except Exception:
                 continue
-            if qty <= 0:
-                continue
-            items.append({"originProductNo": origin_no, "stockQuantity": qty})
+
+            try:
+                qty = int(round(float(row.get("최종재고", 0))))
+            except Exception:
+                qty = 0
+
+            if qty < 0:
+                qty = 0
+            items_map[origin_no] = qty
+
+        items = [{"originProductNo": origin_no, "stockQuantity": qty} for origin_no, qty in items_map.items()]
         return {"items": items}
 
     def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
@@ -5645,8 +5696,6 @@ def render_bulk_stock_page():
                         df_products = pd.DataFrame(auto_state.get("products_records") or [])
                         _updated_df, df_changes, df_missing = apply_actions_to_products_df(df_products, cfg, inputs)
                         df_to_push = df_changes.copy() if isinstance(df_changes, pd.DataFrame) else pd.DataFrame()
-                        if not df_to_push.empty:
-                            df_to_push = df_to_push[df_to_push["증감"].astype(float) > 0].copy()
                         api_result = push_stock_updates(df_to_push)
                         summary_text = summarize_auto_result(api_result.get("sent", 0), df_changes, df_missing, api_result)
                         auto_state["summary_text"] = summary_text
