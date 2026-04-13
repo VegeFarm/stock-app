@@ -5134,6 +5134,10 @@ def render_bulk_stock_page():
 
 
     def build_multi_update_payload(df_changes: pd.DataFrame) -> Dict[str, Any]:
+        """
+        중계서버/백엔드 버전에 따라 재고 일괄수정 요청 필드명이 다를 수 있어
+        items 와 multiProductUpdateRequestVos 를 동시에 보냅니다.
+        """
         items_map: Dict[int, int] = {}
         if df_changes is None or df_changes.empty:
             return {"items": [], "multiProductUpdateRequestVos": []}
@@ -5153,23 +5157,22 @@ def render_bulk_stock_page():
                 qty = 0
             items_map[origin_no] = qty
 
-        items = [{"originProductNo": origin_no, "stockQuantity": qty} for origin_no, qty in items_map.items()]
+        rows = [{"originProductNo": origin_no, "stockQuantity": qty} for origin_no, qty in items_map.items()]
         return {
-            "items": items,
-            "multiProductUpdateRequestVos": items,
+            "items": rows,
+            "multiProductUpdateRequestVos": rows,
         }
 
     def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
         payload = build_multi_update_payload(df_changes)
-        items = payload.get("items") or []
-        request_vos = payload.get("multiProductUpdateRequestVos") or []
-        if not items and not request_vos:
+        payload_items = payload.get("multiProductUpdateRequestVos") or payload.get("items") or []
+        if not payload_items:
             return {"sent": 0, "response": {"message": "변경 대상 없음"}, "payload": payload}
         data = _relay_request("/naver/stock/update", json_body=payload)
         try:
-            sent_count = int(data.get("sent_count") or len(items) or len(request_vos))
+            sent_count = int(data.get("sent_count") or len(payload_items))
         except Exception:
-            sent_count = len(items) or len(request_vos)
+            sent_count = len(payload_items)
         return {"sent": sent_count, "response": data.get("data") or data, "payload": payload, "relay": data}
 
     def _telegram_request(method: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
