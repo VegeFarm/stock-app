@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from collections import defaultdict, OrderedDict
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict
 
 import pandas as pd
 import streamlit as st
@@ -4039,11 +4039,6 @@ def render_bulk_stock_page():
     import json
     import os
     import hashlib
-    import base64
-    try:
-        import bcrypt
-    except Exception:
-        bcrypt = None
     from dataclasses import dataclass
     from datetime import datetime
     import time
@@ -4880,96 +4875,114 @@ def render_bulk_stock_page():
         return updated_bytes, pd.DataFrame(changes), df_missing, changed_rows_bytes
 
 
+    # ============================
+    # Auto mode helpers
+    # ============================
+    RELAY_BASE_URL = (os.environ.get("RELAY_BASE_URL") or "").strip().rstrip("/")
+    RELAY_SHARED_TOKEN = (os.environ.get("RELAY_SHARED_TOKEN") or "").strip()
+    TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    TELEGRAM_AUTO_POLL_SECONDS = max(2, int((os.environ.get("TELEGRAM_AUTO_POLL_SECONDS") or "5").strip() or "5"))
 
-# ============================
-# Auto mode helpers
-# ============================
-RELAY_BASE_URL = (os.environ.get("RELAY_BASE_URL") or "").strip().rstrip("/")
-RELAY_SHARED_TOKEN = (os.environ.get("RELAY_SHARED_TOKEN") or "").strip()
-TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-TELEGRAM_AUTO_POLL_SECONDS = max(2, int((os.environ.get("TELEGRAM_AUTO_POLL_SECONDS") or "5").strip() or "5"))
-
-def _safe_json(resp):
-    try:
-        return resp.json()
-    except Exception:
-        return {"text": getattr(resp, "text", "")}
-
-def _get_required_auto_env_missing() -> List[str]:
-    missing = []
-    for k, v in [
-        ("RELAY_BASE_URL", RELAY_BASE_URL),
-        ("RELAY_SHARED_TOKEN", RELAY_SHARED_TOKEN),
-        ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
-        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
-    ]:
-        if not str(v or "").strip():
-            missing.append(k)
-    return missing
-
-def _get_search_body(page: int, size: int) -> Dict[str, Any]:
-    raw = (os.environ.get("NAVER_PRODUCT_SEARCH_BODY") or "").strip()
-    body: Dict[str, Any] = {}
-    if raw:
+    def _safe_json(resp):
         try:
-            loaded = json.loads(raw)
-            if isinstance(loaded, dict):
-                body.update(loaded)
+            return resp.json()
         except Exception:
-            pass
-    body.setdefault("page", page)
-    body.setdefault("size", size)
-    return body
+            return {"text": getattr(resp, "text", "")}
 
-def _iter_dicts(node: Any):
-    if isinstance(node, dict):
-        yield node
-        for v in node.values():
-            yield from _iter_dicts(v)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _iter_dicts(item)
+    def _get_required_auto_env_missing() -> List[str]:
+        missing = []
+        for k, v in [
+            ("RELAY_BASE_URL", RELAY_BASE_URL),
+            ("RELAY_SHARED_TOKEN", RELAY_SHARED_TOKEN),
+            ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+            ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
+        ]:
+            if not str(v or "").strip():
+                missing.append(k)
+        return missing
 
-def _relay_request(path: str, *, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if not RELAY_BASE_URL:
-        raise RuntimeError("RELAY_BASE_URL 환경변수가 비어 있습니다.")
-    if not RELAY_SHARED_TOKEN:
-        raise RuntimeError("RELAY_SHARED_TOKEN 환경변수가 비어 있습니다.")
-    url = f"{RELAY_BASE_URL}{path}"
-    resp = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {RELAY_SHARED_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        json=json_body or {},
-        timeout=60,
-    )
-    data = _safe_json(resp)
-    if resp.status_code >= 400:
-        raise RuntimeError(f"중계서버 호출 실패: POST {path} / {resp.status_code} / {data}")
-    if not isinstance(data, dict):
-        raise RuntimeError(f"중계서버 응답 형식이 올바르지 않습니다: {data}")
-    if data.get("ok") is False:
-        raise RuntimeError(f"중계서버 처리 실패: {data.get('status_code')} / {data.get('text') or data.get('data')}")
-    return data
+    def _get_search_body(page: int, size: int) -> Dict[str, Any]:
+        raw = (os.environ.get("NAVER_PRODUCT_SEARCH_BODY") or "").strip()
+        body: Dict[str, Any] = {}
+        if raw:
+            try:
+                loaded = json.loads(raw)
+                if isinstance(loaded, dict):
+                    body.update(loaded)
+            except Exception:
+                pass
+        body.setdefault("page", page)
+        body.setdefault("size", size)
+        return body
 
-def _extract_products_from_search_payload(payload: Any) -> pd.DataFrame:
-    rows: List[Dict[str, Any]] = []
-    seen = set()
-    for d in _iter_dicts(payload):
-        cps = d.get("channelProducts")
-        if isinstance(cps, list) and cps:
-            origin_no = d.get("originProductNo")
-            for cp in cps:
-                if not isinstance(cp, dict):
-                    continue
+    def _iter_dicts(node: Any):
+        if isinstance(node, dict):
+            yield node
+            for v in node.values():
+                yield from _iter_dicts(v)
+        elif isinstance(node, list):
+            for item in node:
+                yield from _iter_dicts(item)
+
+    def _relay_request(path: str, *, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not RELAY_BASE_URL:
+            raise RuntimeError("RELAY_BASE_URL 환경변수가 비어 있습니다.")
+        if not RELAY_SHARED_TOKEN:
+            raise RuntimeError("RELAY_SHARED_TOKEN 환경변수가 비어 있습니다.")
+        url = f"{RELAY_BASE_URL}{path}"
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {RELAY_SHARED_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=json_body or {},
+            timeout=60,
+        )
+        data = _safe_json(resp)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"중계서버 호출 실패: POST {path} / {resp.status_code} / {data}")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"중계서버 응답 형식이 올바르지 않습니다: {data}")
+        if data.get("ok") is False:
+            raise RuntimeError(f"중계서버 처리 실패: {data.get('status_code')} / {data.get('text') or data.get('data')}")
+        return data
+
+    def _extract_products_from_search_payload(payload: Any) -> pd.DataFrame:
+        rows: List[Dict[str, Any]] = []
+        seen = set()
+        for d in _iter_dicts(payload):
+            cps = d.get("channelProducts")
+            if isinstance(cps, list) and cps:
+                origin_no = d.get("originProductNo")
+                for cp in cps:
+                    if not isinstance(cp, dict):
+                        continue
+                    row = {
+                        "originProductNo": cp.get("originProductNo") or origin_no,
+                        "channelProductNo": cp.get("channelProductNo") or cp.get("smartstoreChannelProductNo") or cp.get("id"),
+                        "name": cp.get("name") or cp.get("channelProductName") or d.get("name") or d.get("originProductName"),
+                        "stockQuantity": cp.get("stockQuantity"),
+                    }
+                    try:
+                        row["originProductNo"] = int(row["originProductNo"]) if row["originProductNo"] is not None else None
+                    except Exception:
+                        row["originProductNo"] = None
+                    try:
+                        row["stockQuantity"] = float(row["stockQuantity"]) if row["stockQuantity"] is not None else 0.0
+                    except Exception:
+                        row["stockQuantity"] = 0.0
+                    key = (row.get("originProductNo"), row.get("channelProductNo"), row.get("name"))
+                    if row.get("originProductNo") is not None and row.get("name") and key not in seen:
+                        seen.add(key)
+                        rows.append(row)
+            elif d.get("originProductNo") is not None and (d.get("stockQuantity") is not None) and (d.get("name") or d.get("originProductName")):
                 row = {
-                    "originProductNo": cp.get("originProductNo") or origin_no,
-                    "channelProductNo": cp.get("channelProductNo") or cp.get("smartstoreChannelProductNo") or cp.get("id"),
-                    "name": cp.get("name") or cp.get("channelProductName") or d.get("name") or d.get("originProductName"),
-                    "stockQuantity": cp.get("stockQuantity"),
+                    "originProductNo": d.get("originProductNo"),
+                    "channelProductNo": d.get("channelProductNo") or d.get("smartstoreChannelProductNo") or d.get("id"),
+                    "name": d.get("name") or d.get("originProductName"),
+                    "stockQuantity": d.get("stockQuantity"),
                 }
                 try:
                     row["originProductNo"] = int(row["originProductNo"]) if row["originProductNo"] is not None else None
@@ -4983,202 +4996,115 @@ def _extract_products_from_search_payload(payload: Any) -> pd.DataFrame:
                 if row.get("originProductNo") is not None and row.get("name") and key not in seen:
                     seen.add(key)
                     rows.append(row)
-        elif d.get("originProductNo") is not None and (d.get("stockQuantity") is not None) and (d.get("name") or d.get("originProductName")):
-            row = {
-                "originProductNo": d.get("originProductNo"),
-                "channelProductNo": d.get("channelProductNo") or d.get("smartstoreChannelProductNo") or d.get("id"),
-                "name": d.get("name") or d.get("originProductName"),
-                "stockQuantity": d.get("stockQuantity"),
-            }
-            try:
-                row["originProductNo"] = int(row["originProductNo"]) if row["originProductNo"] is not None else None
-            except Exception:
-                row["originProductNo"] = None
-            try:
-                row["stockQuantity"] = float(row["stockQuantity"]) if row["stockQuantity"] is not None else 0.0
-            except Exception:
-                row["stockQuantity"] = 0.0
-            key = (row.get("originProductNo"), row.get("channelProductNo"), row.get("name"))
-            if row.get("originProductNo") is not None and row.get("name") and key not in seen:
-                seen.add(key)
-                rows.append(row)
-    if not rows:
-        return pd.DataFrame(columns=["originProductNo", "channelProductNo", "name", "stockQuantity"])
-    df = pd.DataFrame(rows)
-    df["name"] = df["name"].astype(str).str.strip()
-    df = df[df["name"] != ""].copy()
-    return df[["originProductNo", "channelProductNo", "name", "stockQuantity"]].drop_duplicates(subset=["originProductNo", "channelProductNo", "name"])
+        if not rows:
+            return pd.DataFrame(columns=["originProductNo", "channelProductNo", "name", "stockQuantity"])
+        df = pd.DataFrame(rows)
+        df["name"] = df["name"].astype(str).str.strip()
+        df = df[df["name"] != ""].copy()
+        return df[["originProductNo", "channelProductNo", "name", "stockQuantity"]].drop_duplicates(subset=["originProductNo", "channelProductNo", "name"])
 
-def fetch_naver_products_df() -> pd.DataFrame:
-    relay_resp = _relay_request("/naver/products/search", json_body={"body": _get_search_body(page=1, size=500)})
-    payload = relay_resp.get("data") or {}
-    df = _extract_products_from_search_payload(payload)
-    if df.empty:
-        raise RuntimeError("중계서버를 통해 받은 네이버 상품 조회 결과가 없습니다. NAVER_PRODUCT_SEARCH_BODY 또는 중계서버 응답을 확인해 주세요.")
-    return df.drop_duplicates(subset=["originProductNo", "channelProductNo", "name"]).reset_index(drop=True)
+    def fetch_naver_products_df() -> pd.DataFrame:
+        relay_resp = _relay_request("/naver/products/search", json_body={"body": _get_search_body(page=1, size=500)})
+        payload = relay_resp.get("data") or {}
+        df = _extract_products_from_search_payload(payload)
+        if df.empty:
+            raise RuntimeError("중계서버를 통해 받은 네이버 상품 조회 결과가 없습니다. NAVER_PRODUCT_SEARCH_BODY 또는 중계서버 응답을 확인해 주세요.")
+        return df.drop_duplicates(subset=["originProductNo", "channelProductNo", "name"]).reset_index(drop=True)
 
     def compute_stock_display_map_from_df(df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, str]:
-        recog_logic = _get_recognition_logic(cfg)
-        products = cfg.get("products", []) or []
-        base_kw: Dict[str, str] = {}
-        for p in products:
-            bn = str(p.get("name", "")).strip()
-            kw = str(p.get("keyword") or p.get("name") or "").strip()
-            if bn:
-                base_kw[bn] = kw or bn
-        bases_sorted = sorted([(bn, base_kw.get(bn, bn)) for bn in base_kw.keys()], key=lambda x: len(str(x[1] or "")), reverse=True)
-        rules_map = cfg.get("rules", {}) or {}
-
-        def _scoped_tokens(base_keyword: str, rule_keyword: str) -> List[str]:
-            base_keyword = str(base_keyword or "").strip()
-            rule_keyword = str(rule_keyword or "").strip()
-            if not rule_keyword:
-                return []
-            if not base_keyword:
-                return [rule_keyword]
-            if base_keyword in rule_keyword:
-                return [rule_keyword]
-            return [base_keyword, rule_keyword]
-
-        matchers_by_base: Dict[str, List[Dict[str, Any]]] = {}
-        unit_pref: Dict[str, str] = {}
-        unit_seen: Dict[str, str] = {}
-        for bn, bkw in bases_sorted:
-            rs = rules_map.get(bn, []) or []
-            ms: List[Dict[str, Any]] = []
-            unit_counts: Dict[str, int] = {}
-            for i, r in enumerate(rs):
-                rr = Rule.from_dict(r)
-                if not rr.keyword:
-                    continue
-                tokens = _scoped_tokens(bkw, rr.keyword)
-                if not tokens:
-                    continue
-                factor, unit = _parse_factor_and_unit(rr.keyword, recog_logic)
-                ms.append({"tokens": tokens, "keyword": rr.keyword, "factor": factor, "unit": unit, "order": i})
-                if unit:
-                    unit_counts[unit] = unit_counts.get(unit, 0) + 1
-            ms.sort(key=lambda m: (sum(len(t) for t in m["tokens"]), len(m["tokens"]), len(m["keyword"])), reverse=True)
-            matchers_by_base[bn] = ms
-            if unit_counts.get("kg", 0) > 0:
-                unit_pref[bn] = "kg"
-            elif unit_counts:
-                unit_pref[bn] = sorted(unit_counts.items(), key=lambda kv: (kv[1], len(kv[0])), reverse=True)[0][0]
-            else:
-                unit_pref[bn] = ""
-
-        totals: Dict[str, Decimal] = {}
-
-        def _match_tokens(tokens: List[str], name_str: str) -> bool:
-            return bool(tokens) and all((t in name_str) for t in tokens)
-
+        product_display_map: Dict[str, str] = {}
+        if df_products is None or df_products.empty:
+            return product_display_map
         for _, row in df_products.iterrows():
-            name_str = str(row.get("name") or "").strip()
-            if not name_str:
+            actual_name = str(row.get("name") or "").strip()
+            if not actual_name:
                 continue
-            base_name = None
-            for bn, kw in bases_sorted:
-                if kw and kw in name_str:
-                    base_name = bn
-                    break
-            if base_name is None:
-                continue
-            inv_qty = _cell_to_decimal(row.get("stockQuantity"))
-            if inv_qty == 0:
-                continue
-            chosen = None
-            for m in matchers_by_base.get(base_name, []):
-                if _match_tokens(m["tokens"], name_str):
-                    chosen = m
-                    break
-            has_rules = bool(matchers_by_base.get(base_name))
-            if chosen and chosen.get("unit"):
-                factor = chosen["factor"]
-                unit = chosen["unit"]
-            else:
-                if has_rules and chosen is None:
+            for p in cfg.get("products", []):
+                display_name = str(p.get("name") or "").strip()
+                if not display_name:
                     continue
-                factor, unit = _parse_factor_and_unit(name_str, recog_logic)
-            pref = unit_pref.get(base_name, "") or ""
-            if pref:
-                unit_seen[base_name] = pref
-            elif unit:
-                unit_seen[base_name] = unit_seen.get(base_name) or unit
-            totals[base_name] = totals.get(base_name, Decimal("0")) + (inv_qty * factor)
+                pattern = str(p.get("pattern") or p.get("keyword") or display_name).strip()
+                if not pattern:
+                    continue
+                if pattern in actual_name:
+                    qty = float(row.get("stockQuantity") or 0)
+                    product_display_map[display_name] = fmt_qty_no_zero(qty)
+                    break
+        return product_display_map
 
-        out: Dict[str, str] = {}
-        for bn, _kw in bases_sorted:
-            total = totals.get(bn, Decimal("0"))
-            if total == 0:
-                out[bn] = "0"
-                continue
-            unit = unit_pref.get(bn, "") or unit_seen.get(bn, "") or ""
-            if unit == "kg":
-                out[bn] = f"{_fmt_decimal(total, max_decimals=3)}kg"
-            else:
-                s = _fmt_decimal(total, max_decimals=3)
-                out[bn] = f"{s}{unit}" if unit else s
-        return out
-
-    def apply_actions_to_products_df(df_products: pd.DataFrame, cfg: Dict[str, Any], inputs: Dict[str, float]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        actions, df_missing = build_actions(cfg, inputs)
-        df2 = df_products.copy()
-        changes: List[Dict[str, Any]] = []
-
-        def match_action(a: Dict[str, Any], name_str: str) -> bool:
-            toks = a.get("match_tokens") or []
-            return bool(toks) and all((t in name_str) for t in toks)
-
-        for idx, row in df2.iterrows():
-            name_str = str(row.get("name") or "")
-            if not name_str:
-                continue
-            matched = [a for a in actions if match_action(a, name_str)]
-            if not matched:
-                continue
-            delta = sum(float(m["delta"]) for m in matched)
-            if abs(delta) < 1e-12:
-                continue
-            old = to_number(row.get("stockQuantity"))
-            new = old + delta
-            df2.at[idx, "stockQuantity"] = new
-            changes.append({
+    def apply_auto_stock_to_df(df_work: pd.DataFrame, df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        df2 = df_work.copy()
+        current_rows = []
+        for _, row in df_products.iterrows():
+            current_rows.append({
                 "originProductNo": row.get("originProductNo"),
-                "상품명": name_str,
-                "기존재고": old,
-                "증감": delta,
-                "최종재고": new,
-                "매칭키워드": ", ".join([str(m.get("display") or " & ".join(m.get("match_tokens", []))) for m in matched]),
-                "원천상품": ", ".join(sorted({b for m in matched for b in m.get("bases", [])})),
+                "channelProductNo": row.get("channelProductNo"),
+                "실제상품명": row.get("name"),
+                "현재재고": float(row.get("stockQuantity") or 0),
             })
-        return df2, pd.DataFrame(changes), df_missing
+        current_df = pd.DataFrame(current_rows)
+        changes: List[Dict[str, Any]] = []
+        missing: List[Dict[str, Any]] = []
 
+        for i, work_row in df2.iterrows():
+            product = str(work_row.get("상품") or "").strip()
+            try:
+                input_qty = float(work_row.get("입력수량") or 0)
+            except Exception:
+                input_qty = 0.0
+            if input_qty <= 0:
+                continue
+            cfg_row = None
+            for p in cfg.get("products", []):
+                if str(p.get("name") or "").strip() == product:
+                    cfg_row = p
+                    break
+            pattern = str((cfg_row or {}).get("pattern") or (cfg_row or {}).get("keyword") or product).strip()
+            matched = current_df[current_df["실제상품명"].astype(str).str.contains(re.escape(pattern), na=False)] if pattern else current_df.iloc[0:0]
+            if matched.empty:
+                missing.append({"상품": product, "패턴": pattern, "사유": "매칭 실패"})
+                continue
+            target = matched.iloc[0]
+            before_qty = float(target.get("현재재고") or 0)
+            after_qty = before_qty + input_qty
+            df2.at[i, "재고수량"] = fmt_qty_no_zero(after_qty)
+            changes.append({
+                "상품": product,
+                "입력수량": input_qty,
+                "현재재고": before_qty,
+                "최종재고": after_qty,
+                "originProductNo": int(target.get("originProductNo")),
+                "channelProductNo": target.get("channelProductNo"),
+                "실제상품명": str(target.get("실제상품명") or ""),
+                "패턴": pattern,
+            })
+        return df2, pd.DataFrame(changes), pd.DataFrame(missing)
 
-def build_multi_update_payload(df_changes: pd.DataFrame) -> Dict[str, Any]:
-    items: List[Dict[str, Any]] = []
-    if df_changes is None or df_changes.empty:
-        return {"items": []}
-    for _, row in df_changes.iterrows():
+    def build_multi_update_payload(df_changes: pd.DataFrame) -> Dict[str, Any]:
+        items: List[Dict[str, Any]] = []
+        if df_changes is None or df_changes.empty:
+            return {"items": []}
+        for _, row in df_changes.iterrows():
+            try:
+                qty = int(round(float(row.get("최종재고", 0))))
+                origin_no = int(row.get("originProductNo"))
+            except Exception:
+                continue
+            if qty <= 0:
+                continue
+            items.append({"originProductNo": origin_no, "stockQuantity": qty})
+        return {"items": items}
+
+    def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
+        payload = build_multi_update_payload(df_changes)
+        if not payload.get("items"):
+            return {"sent": 0, "response": {"message": "변경 대상 없음"}, "payload": payload}
+        data = _relay_request("/naver/stock/update", json_body=payload)
         try:
-            qty = int(round(float(row.get("최종재고", 0))))
-            origin_no = int(row.get("originProductNo"))
+            sent_count = int(data.get("sent_count") or len(payload.get("items") or []))
         except Exception:
-            continue
-        if qty <= 0:
-            continue
-        items.append({"originProductNo": origin_no, "stockQuantity": qty})
-    return {"items": items}
-
-def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
-    payload = build_multi_update_payload(df_changes)
-    if not payload.get("items"):
-        return {"sent": 0, "response": {"message": "변경 대상 없음"}, "payload": payload}
-    data = _relay_request("/naver/stock/update", json_body=payload)
-    try:
-        sent_count = int(data.get("sent_count") or len(payload.get("items") or []))
-    except Exception:
-        sent_count = len(payload.get("items") or [])
-    return {"sent": sent_count, "response": data.get("data") or data, "payload": payload, "relay": data}
+            sent_count = len(payload.get("items") or [])
+        return {"sent": sent_count, "response": data.get("data") or data, "payload": payload, "relay": data}
 
     def _telegram_request(method: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not TELEGRAM_BOT_TOKEN:
@@ -5186,30 +5112,39 @@ def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
         resp = requests.post(url, params=params, json=json_body, timeout=30)
         data = _safe_json(resp)
-        if resp.status_code >= 400 or not isinstance(data, dict) or not data.get("ok", False):
+        if resp.status_code >= 400 or not data.get("ok", False):
             raise RuntimeError(f"텔레그램 API 실패: {method} / {resp.status_code} / {data}")
         return data
 
-    def telegram_send_message(text: str) -> Dict[str, Any]:
+    def send_telegram_message(text: str) -> Dict[str, Any]:
+        if not TELEGRAM_CHAT_ID:
+            raise RuntimeError("TELEGRAM_CHAT_ID 환경변수가 비어 있습니다.")
         return _telegram_request("sendMessage", json_body={"chat_id": TELEGRAM_CHAT_ID, "text": text})
 
-    def telegram_get_updates(offset: Optional[int] = None) -> List[Dict[str, Any]]:
-        params = {"timeout": 0, "limit": 100}
-        if offset is not None:
-            params["offset"] = int(offset)
-        data = _telegram_request("getUpdates", params=params)
+    def get_latest_valid_reply(after_unix_ts: int) -> Optional[Dict[str, Any]]:
+        offset = int(st.session_state.get("bulk_tg_update_offset") or 0)
+        data = _telegram_request("getUpdates", params={"timeout": 0, "offset": offset + 1})
         result = data.get("result") or []
-        return result if isinstance(result, list) else []
-
-    def _get_latest_update_id() -> int:
-        updates = telegram_get_updates()
-        max_id = 0
-        for upd in updates:
-            try:
-                max_id = max(max_id, int(upd.get("update_id") or 0))
-            except Exception:
-                pass
-        return max_id
+        latest = None
+        max_update_id = offset
+        for item in result:
+            update_id = int(item.get("update_id") or 0)
+            max_update_id = max(max_update_id, update_id)
+            msg = item.get("message") or item.get("edited_message") or {}
+            if not msg:
+                continue
+            if str(msg.get("chat", {}).get("id")) != str(TELEGRAM_CHAT_ID):
+                continue
+            date_ts = int(msg.get("date") or 0)
+            text = str(msg.get("text") or "").strip()
+            if date_ts < int(after_unix_ts):
+                continue
+            if not text:
+                continue
+            latest = {"update_id": update_id, "date": date_ts, "text": text}
+            break
+        st.session_state["bulk_tg_update_offset"] = max_update_id
+        return latest
 
     def build_current_stock_message(current_names: List[str], stock_map: Dict[str, str]) -> str:
         lines = ["[현재 재고 수량]"]
@@ -5217,9 +5152,7 @@ def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
             lines.append(f"{i}. {name} {stock_map.get(name, '0')}")
         return "\n".join(lines)
 
-    def parse_first_reply_message(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
-        if text is None:
-            return False, {}, "메시지가 비어 있습니다."
+    def parse_number_qty_reply(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
         parsed: Dict[int, float] = {}
         lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
         if not lines:
@@ -5258,9 +5191,9 @@ def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
             lines.append(f"응답: {resp.get('message')}")
         return "\n".join(lines)
 
-# ============================
-# UI
-# ============================
+    # ============================
+    # UI
+    # ============================
     cfg = load_config()
 
     # 자동복원: 상품목록이 비어있으면 기본 34개를 채워넣습니다.
