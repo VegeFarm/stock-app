@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from collections import defaultdict, OrderedDict
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 
 import pandas as pd
 import streamlit as st
@@ -4039,6 +4039,11 @@ def render_bulk_stock_page():
     import json
     import os
     import hashlib
+    import base64
+    try:
+        import bcrypt
+    except Exception:
+        bcrypt = None
     from dataclasses import dataclass
     from datetime import datetime
     import time
@@ -4875,6 +4880,384 @@ def render_bulk_stock_page():
         return updated_bytes, pd.DataFrame(changes), df_missing, changed_rows_bytes
 
 
+
+# ============================
+# Auto mode helpers
+# ============================
+RELAY_BASE_URL = (os.environ.get("RELAY_BASE_URL") or "").strip().rstrip("/")
+RELAY_SHARED_TOKEN = (os.environ.get("RELAY_SHARED_TOKEN") or "").strip()
+TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+TELEGRAM_AUTO_POLL_SECONDS = max(2, int((os.environ.get("TELEGRAM_AUTO_POLL_SECONDS") or "5").strip() or "5"))
+
+def _safe_json(resp):
+    try:
+        return resp.json()
+    except Exception:
+        return {"text": getattr(resp, "text", "")}
+
+def _get_required_auto_env_missing() -> List[str]:
+    missing = []
+    for k, v in [
+        ("RELAY_BASE_URL", RELAY_BASE_URL),
+        ("RELAY_SHARED_TOKEN", RELAY_SHARED_TOKEN),
+        ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+        ("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID),
+    ]:
+        if not str(v or "").strip():
+            missing.append(k)
+    return missing
+
+def _get_search_body(page: int, size: int) -> Dict[str, Any]:
+    raw = (os.environ.get("NAVER_PRODUCT_SEARCH_BODY") or "").strip()
+    body: Dict[str, Any] = {}
+    if raw:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                body.update(loaded)
+        except Exception:
+            pass
+    body.setdefault("page", page)
+    body.setdefault("size", size)
+    return body
+
+def _iter_dicts(node: Any):
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _iter_dicts(v)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_dicts(item)
+
+def _relay_request(path: str, *, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not RELAY_BASE_URL:
+        raise RuntimeError("RELAY_BASE_URL 환경변수가 비어 있습니다.")
+    if not RELAY_SHARED_TOKEN:
+        raise RuntimeError("RELAY_SHARED_TOKEN 환경변수가 비어 있습니다.")
+    url = f"{RELAY_BASE_URL}{path}"
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {RELAY_SHARED_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json=json_body or {},
+        timeout=60,
+    )
+    data = _safe_json(resp)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"중계서버 호출 실패: POST {path} / {resp.status_code} / {data}")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"중계서버 응답 형식이 올바르지 않습니다: {data}")
+    if data.get("ok") is False:
+        raise RuntimeError(f"중계서버 처리 실패: {data.get('status_code')} / {data.get('text') or data.get('data')}")
+    return data
+
+def _extract_products_from_search_payload(payload: Any) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    seen = set()
+    for d in _iter_dicts(payload):
+        cps = d.get("channelProducts")
+        if isinstance(cps, list) and cps:
+            origin_no = d.get("originProductNo")
+            for cp in cps:
+                if not isinstance(cp, dict):
+                    continue
+                row = {
+                    "originProductNo": cp.get("originProductNo") or origin_no,
+                    "channelProductNo": cp.get("channelProductNo") or cp.get("smartstoreChannelProductNo") or cp.get("id"),
+                    "name": cp.get("name") or cp.get("channelProductName") or d.get("name") or d.get("originProductName"),
+                    "stockQuantity": cp.get("stockQuantity"),
+                }
+                try:
+                    row["originProductNo"] = int(row["originProductNo"]) if row["originProductNo"] is not None else None
+                except Exception:
+                    row["originProductNo"] = None
+                try:
+                    row["stockQuantity"] = float(row["stockQuantity"]) if row["stockQuantity"] is not None else 0.0
+                except Exception:
+                    row["stockQuantity"] = 0.0
+                key = (row.get("originProductNo"), row.get("channelProductNo"), row.get("name"))
+                if row.get("originProductNo") is not None and row.get("name") and key not in seen:
+                    seen.add(key)
+                    rows.append(row)
+        elif d.get("originProductNo") is not None and (d.get("stockQuantity") is not None) and (d.get("name") or d.get("originProductName")):
+            row = {
+                "originProductNo": d.get("originProductNo"),
+                "channelProductNo": d.get("channelProductNo") or d.get("smartstoreChannelProductNo") or d.get("id"),
+                "name": d.get("name") or d.get("originProductName"),
+                "stockQuantity": d.get("stockQuantity"),
+            }
+            try:
+                row["originProductNo"] = int(row["originProductNo"]) if row["originProductNo"] is not None else None
+            except Exception:
+                row["originProductNo"] = None
+            try:
+                row["stockQuantity"] = float(row["stockQuantity"]) if row["stockQuantity"] is not None else 0.0
+            except Exception:
+                row["stockQuantity"] = 0.0
+            key = (row.get("originProductNo"), row.get("channelProductNo"), row.get("name"))
+            if row.get("originProductNo") is not None and row.get("name") and key not in seen:
+                seen.add(key)
+                rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=["originProductNo", "channelProductNo", "name", "stockQuantity"])
+    df = pd.DataFrame(rows)
+    df["name"] = df["name"].astype(str).str.strip()
+    df = df[df["name"] != ""].copy()
+    return df[["originProductNo", "channelProductNo", "name", "stockQuantity"]].drop_duplicates(subset=["originProductNo", "channelProductNo", "name"])
+
+def fetch_naver_products_df() -> pd.DataFrame:
+    relay_resp = _relay_request("/naver/products/search", json_body={"body": _get_search_body(page=1, size=500)})
+    payload = relay_resp.get("data") or {}
+    df = _extract_products_from_search_payload(payload)
+    if df.empty:
+        raise RuntimeError("중계서버를 통해 받은 네이버 상품 조회 결과가 없습니다. NAVER_PRODUCT_SEARCH_BODY 또는 중계서버 응답을 확인해 주세요.")
+    return df.drop_duplicates(subset=["originProductNo", "channelProductNo", "name"]).reset_index(drop=True)
+
+    def compute_stock_display_map_from_df(df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, str]:
+        recog_logic = _get_recognition_logic(cfg)
+        products = cfg.get("products", []) or []
+        base_kw: Dict[str, str] = {}
+        for p in products:
+            bn = str(p.get("name", "")).strip()
+            kw = str(p.get("keyword") or p.get("name") or "").strip()
+            if bn:
+                base_kw[bn] = kw or bn
+        bases_sorted = sorted([(bn, base_kw.get(bn, bn)) for bn in base_kw.keys()], key=lambda x: len(str(x[1] or "")), reverse=True)
+        rules_map = cfg.get("rules", {}) or {}
+
+        def _scoped_tokens(base_keyword: str, rule_keyword: str) -> List[str]:
+            base_keyword = str(base_keyword or "").strip()
+            rule_keyword = str(rule_keyword or "").strip()
+            if not rule_keyword:
+                return []
+            if not base_keyword:
+                return [rule_keyword]
+            if base_keyword in rule_keyword:
+                return [rule_keyword]
+            return [base_keyword, rule_keyword]
+
+        matchers_by_base: Dict[str, List[Dict[str, Any]]] = {}
+        unit_pref: Dict[str, str] = {}
+        unit_seen: Dict[str, str] = {}
+        for bn, bkw in bases_sorted:
+            rs = rules_map.get(bn, []) or []
+            ms: List[Dict[str, Any]] = []
+            unit_counts: Dict[str, int] = {}
+            for i, r in enumerate(rs):
+                rr = Rule.from_dict(r)
+                if not rr.keyword:
+                    continue
+                tokens = _scoped_tokens(bkw, rr.keyword)
+                if not tokens:
+                    continue
+                factor, unit = _parse_factor_and_unit(rr.keyword, recog_logic)
+                ms.append({"tokens": tokens, "keyword": rr.keyword, "factor": factor, "unit": unit, "order": i})
+                if unit:
+                    unit_counts[unit] = unit_counts.get(unit, 0) + 1
+            ms.sort(key=lambda m: (sum(len(t) for t in m["tokens"]), len(m["tokens"]), len(m["keyword"])), reverse=True)
+            matchers_by_base[bn] = ms
+            if unit_counts.get("kg", 0) > 0:
+                unit_pref[bn] = "kg"
+            elif unit_counts:
+                unit_pref[bn] = sorted(unit_counts.items(), key=lambda kv: (kv[1], len(kv[0])), reverse=True)[0][0]
+            else:
+                unit_pref[bn] = ""
+
+        totals: Dict[str, Decimal] = {}
+
+        def _match_tokens(tokens: List[str], name_str: str) -> bool:
+            return bool(tokens) and all((t in name_str) for t in tokens)
+
+        for _, row in df_products.iterrows():
+            name_str = str(row.get("name") or "").strip()
+            if not name_str:
+                continue
+            base_name = None
+            for bn, kw in bases_sorted:
+                if kw and kw in name_str:
+                    base_name = bn
+                    break
+            if base_name is None:
+                continue
+            inv_qty = _cell_to_decimal(row.get("stockQuantity"))
+            if inv_qty == 0:
+                continue
+            chosen = None
+            for m in matchers_by_base.get(base_name, []):
+                if _match_tokens(m["tokens"], name_str):
+                    chosen = m
+                    break
+            has_rules = bool(matchers_by_base.get(base_name))
+            if chosen and chosen.get("unit"):
+                factor = chosen["factor"]
+                unit = chosen["unit"]
+            else:
+                if has_rules and chosen is None:
+                    continue
+                factor, unit = _parse_factor_and_unit(name_str, recog_logic)
+            pref = unit_pref.get(base_name, "") or ""
+            if pref:
+                unit_seen[base_name] = pref
+            elif unit:
+                unit_seen[base_name] = unit_seen.get(base_name) or unit
+            totals[base_name] = totals.get(base_name, Decimal("0")) + (inv_qty * factor)
+
+        out: Dict[str, str] = {}
+        for bn, _kw in bases_sorted:
+            total = totals.get(bn, Decimal("0"))
+            if total == 0:
+                out[bn] = "0"
+                continue
+            unit = unit_pref.get(bn, "") or unit_seen.get(bn, "") or ""
+            if unit == "kg":
+                out[bn] = f"{_fmt_decimal(total, max_decimals=3)}kg"
+            else:
+                s = _fmt_decimal(total, max_decimals=3)
+                out[bn] = f"{s}{unit}" if unit else s
+        return out
+
+    def apply_actions_to_products_df(df_products: pd.DataFrame, cfg: Dict[str, Any], inputs: Dict[str, float]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        actions, df_missing = build_actions(cfg, inputs)
+        df2 = df_products.copy()
+        changes: List[Dict[str, Any]] = []
+
+        def match_action(a: Dict[str, Any], name_str: str) -> bool:
+            toks = a.get("match_tokens") or []
+            return bool(toks) and all((t in name_str) for t in toks)
+
+        for idx, row in df2.iterrows():
+            name_str = str(row.get("name") or "")
+            if not name_str:
+                continue
+            matched = [a for a in actions if match_action(a, name_str)]
+            if not matched:
+                continue
+            delta = sum(float(m["delta"]) for m in matched)
+            if abs(delta) < 1e-12:
+                continue
+            old = to_number(row.get("stockQuantity"))
+            new = old + delta
+            df2.at[idx, "stockQuantity"] = new
+            changes.append({
+                "originProductNo": row.get("originProductNo"),
+                "상품명": name_str,
+                "기존재고": old,
+                "증감": delta,
+                "최종재고": new,
+                "매칭키워드": ", ".join([str(m.get("display") or " & ".join(m.get("match_tokens", []))) for m in matched]),
+                "원천상품": ", ".join(sorted({b for m in matched for b in m.get("bases", [])})),
+            })
+        return df2, pd.DataFrame(changes), df_missing
+
+
+def build_multi_update_payload(df_changes: pd.DataFrame) -> Dict[str, Any]:
+    items: List[Dict[str, Any]] = []
+    if df_changes is None or df_changes.empty:
+        return {"items": []}
+    for _, row in df_changes.iterrows():
+        try:
+            qty = int(round(float(row.get("최종재고", 0))))
+            origin_no = int(row.get("originProductNo"))
+        except Exception:
+            continue
+        if qty <= 0:
+            continue
+        items.append({"originProductNo": origin_no, "stockQuantity": qty})
+    return {"items": items}
+
+def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
+    payload = build_multi_update_payload(df_changes)
+    if not payload.get("items"):
+        return {"sent": 0, "response": {"message": "변경 대상 없음"}, "payload": payload}
+    data = _relay_request("/naver/stock/update", json_body=payload)
+    try:
+        sent_count = int(data.get("sent_count") or len(payload.get("items") or []))
+    except Exception:
+        sent_count = len(payload.get("items") or [])
+    return {"sent": sent_count, "response": data.get("data") or data, "payload": payload, "relay": data}
+
+    def _telegram_request(method: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not TELEGRAM_BOT_TOKEN:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN 환경변수가 비어 있습니다.")
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
+        resp = requests.post(url, params=params, json=json_body, timeout=30)
+        data = _safe_json(resp)
+        if resp.status_code >= 400 or not isinstance(data, dict) or not data.get("ok", False):
+            raise RuntimeError(f"텔레그램 API 실패: {method} / {resp.status_code} / {data}")
+        return data
+
+    def telegram_send_message(text: str) -> Dict[str, Any]:
+        return _telegram_request("sendMessage", json_body={"chat_id": TELEGRAM_CHAT_ID, "text": text})
+
+    def telegram_get_updates(offset: Optional[int] = None) -> List[Dict[str, Any]]:
+        params = {"timeout": 0, "limit": 100}
+        if offset is not None:
+            params["offset"] = int(offset)
+        data = _telegram_request("getUpdates", params=params)
+        result = data.get("result") or []
+        return result if isinstance(result, list) else []
+
+    def _get_latest_update_id() -> int:
+        updates = telegram_get_updates()
+        max_id = 0
+        for upd in updates:
+            try:
+                max_id = max(max_id, int(upd.get("update_id") or 0))
+            except Exception:
+                pass
+        return max_id
+
+    def build_current_stock_message(current_names: List[str], stock_map: Dict[str, str]) -> str:
+        lines = ["[현재 재고 수량]"]
+        for i, name in enumerate(current_names, start=1):
+            lines.append(f"{i}. {name} {stock_map.get(name, '0')}")
+        return "\n".join(lines)
+
+    def parse_first_reply_message(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
+        if text is None:
+            return False, {}, "메시지가 비어 있습니다."
+        parsed: Dict[int, float] = {}
+        lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+        if not lines:
+            return False, {}, "메시지가 비어 있습니다."
+        for i, line in enumerate(lines, start=1):
+            m = re.fullmatch(r"(\d+)\s+([0-9]+(?:\.[0-9]+)?)", line)
+            if not m:
+                return False, {}, f"{i}번째 줄 형식이 올바르지 않습니다. 예: 1 5"
+            idx = int(m.group(1))
+            qty = float(m.group(2))
+            if idx < 1 or idx > max_index:
+                return False, {}, f"{i}번째 줄 상품 번호가 범위를 벗어났습니다: {idx}"
+            if qty < 0:
+                return False, {}, f"{i}번째 줄 수량은 음수일 수 없습니다."
+            parsed[idx] = parsed.get(idx, 0.0) + qty
+        return True, parsed, ""
+
+    def build_auto_inputs(current_names: List[str], parsed_reply: Dict[int, float]) -> Dict[str, float]:
+        out: Dict[str, float] = {name: 0.0 for name in current_names}
+        for idx, qty in parsed_reply.items():
+            if 1 <= idx <= len(current_names):
+                out[current_names[idx - 1]] = float(qty)
+        return out
+
+    def build_auto_memo_text(current_names: List[str], inputs: Dict[str, float]) -> str:
+        return "\n".join([f"{name} - {fmt_qty_for_memo(float(inputs.get(name, 0.0) or 0.0))}" for name in current_names])
+
+    def summarize_auto_result(sent_count: int, df_changes: pd.DataFrame, df_missing: pd.DataFrame, api_result: Dict[str, Any]) -> str:
+        changed_count = 0 if df_changes is None else int(len(df_changes))
+        missing_count = 0 if df_missing is None else int(len(df_missing))
+        lines = ["[자동 재고 반영 완료]", f"전송건수 {sent_count}", f"실제 변경행 {changed_count}"]
+        if missing_count > 0:
+            lines.append(f"미적용 규칙 {missing_count}")
+        resp = api_result.get("response") if isinstance(api_result, dict) else None
+        if isinstance(resp, dict) and resp.get("message"):
+            lines.append(f"응답: {resp.get('message')}")
+        return "\n".join(lines)
+
     # ============================
     # UI
     # ============================
@@ -4904,255 +5287,417 @@ def render_bulk_stock_page():
     # Pages
     # ============================
     if page.startswith("①"):
-        st.subheader("엑셀 파일 불러오기")
-        uploaded = st.file_uploader("스마트스토어 수정양식 엑셀(.xlsx)을 업로드하세요", type=["xlsx"], key="bulk_xlsx_uploader")
-
-        # 업로드 바이트(중복 getvalue() 방지)
-        uploaded_bytes = uploaded.getvalue() if uploaded is not None else None
-
-        # ✅ '메모장으로 저장' 등으로 rerun 되어도, 마지막 적용 결과(다운로드/변경표)가 사라지지 않게 유지
-        if "last_apply_result" not in st.session_state:
-            st.session_state.last_apply_result = None
-
-        def _fingerprint_upload(name: str, b: bytes) -> str:
-            md5 = hashlib.md5(b).hexdigest()
-            return f"{name}:{len(b)}:{md5}"
-
-        current_fp = (
-            _fingerprint_upload(getattr(uploaded, "name", "") or "", uploaded_bytes)
-            if uploaded_bytes is not None
-            else None
+        mode = st.radio(
+            "입력 방식",
+            options=["수동", "자동"],
+            horizontal=True,
+            key="bulk_stock_input_mode",
         )
 
-        # 다른 엑셀을 새로 업로드하면, 이전 결과는 자동으로 숨김 처리
-        _last = st.session_state.get("last_apply_result")
-        if _last is not None:
-            if (current_fp is None) or (_last.get("fingerprint") != current_fp):
+        if mode == "수동":
+            st.subheader("엑셀 파일 불러오기")
+            uploaded = st.file_uploader("스마트스토어 수정양식 엑셀(.xlsx)을 업로드하세요", type=["xlsx"], key="bulk_xlsx_uploader")
+
+            # 업로드 바이트(중복 getvalue() 방지)
+            uploaded_bytes = uploaded.getvalue() if uploaded is not None else None
+
+            # ✅ '메모장으로 저장' 등으로 rerun 되어도, 마지막 적용 결과(다운로드/변경표)가 사라지지 않게 유지
+            if "last_apply_result" not in st.session_state:
                 st.session_state.last_apply_result = None
 
+            def _fingerprint_upload(name: str, b: bytes) -> str:
+                md5 = hashlib.md5(b).hexdigest()
+                return f"{name}:{len(b)}:{md5}"
 
-        st.subheader("입력할 수량")
-        prod_list = cfg.get("products", [])
-        if not prod_list:
-            st.info("상품목록이 비어있습니다. 사이드바의 '상품목록 관리'에서 상품을 먼저 추가하세요.")
-        else:
-            # 업로드된 엑셀로부터 '재고수량(표시용)'을 계산 (입력/저장에는 절대 사용하지 않음)
-            stock_map: Dict[str, str] = {}
-            if uploaded is not None:
-                try:
-                    stock_map = compute_stock_display_map(uploaded_bytes, cfg)
-                except Exception:
-                    stock_map = {}
+            current_fp = (
+                _fingerprint_upload(getattr(uploaded, "name", "") or "", uploaded_bytes)
+                if uploaded_bytes is not None
+                else None
+            )
 
-            current_names = [str(p.get("name", "")).strip() for p in prod_list if str(p.get("name", "")).strip()]
-            if not current_names:
+            # 다른 엑셀을 새로 업로드하면, 이전 결과는 자동으로 숨김 처리
+            _last = st.session_state.get("last_apply_result")
+            if _last is not None:
+                if (current_fp is None) or (_last.get("fingerprint") != current_fp):
+                    st.session_state.last_apply_result = None
+
+
+            st.subheader("입력할 수량")
+            prod_list = cfg.get("products", [])
+            if not prod_list:
                 st.info("상품목록이 비어있습니다. 사이드바의 '상품목록 관리'에서 상품을 먼저 추가하세요.")
             else:
-                            # 입력값은 '✅ 엑셀에 적용하기'를 눌렀을 때만 확정(저장)됩니다.
-                def _align_qty_df(_df: pd.DataFrame, _names: List[str]) -> pd.DataFrame:
+                # 업로드된 엑셀로부터 '재고수량(표시용)'을 계산 (입력/저장에는 절대 사용하지 않음)
+                stock_map: Dict[str, str] = {}
+                if uploaded is not None:
                     try:
-                        if _df is not None and not _df.empty and "상품" in _df.columns and "입력수량" in _df.columns:
-                            _m = _df.set_index("상품")["입력수량"].to_dict()
-                        else:
-                            _m = {}
+                        stock_map = compute_stock_display_map(uploaded_bytes, cfg)
                     except Exception:
-                        _m = {}
+                        stock_map = {}
 
-                    return pd.DataFrame(
-                        {
-                            "상품": _names,
-                            "입력수량": ["" if (_m.get(n) is None) else _m.get(n, "") for n in _names],
-                        }
-                    )
-
-                # 마지막으로 '적용(확정)'된 값(=엑셀 적용에 사용되는 값)
-                if "qty_committed_df" not in st.session_state:
-                    st.session_state.qty_committed_df = pd.DataFrame(
-                        {"상품": current_names, "입력수량": [""] * len(current_names)}
-                    )
-                st.session_state.qty_committed_df = _align_qty_df(st.session_state.qty_committed_df, current_names)
-                # --- 참고수량: 저장된 값(cfg["ref_qty"])만 표시합니다. (💾 참고수량 저장을 눌러야만 영구 저장됨) ---
-                ref_saved = (cfg.get("ref_qty") or {})
-
-                def _ref_saved_value(_name: str) -> str:
-                    v = ref_saved.get(_name)
-                    return "" if v is None else str(v)
-
-                # 표 표시용(재고수량/참고수량은 표시/입력만)
-                df_view = st.session_state.qty_committed_df.copy()
-                df_view["재고수량"] = [stock_map.get(n, "") for n in df_view["상품"]]
-                df_view["참고수량"] = [_ref_saved_value(n) for n in df_view["상품"]]
-                df_view = df_view[["상품", "입력수량", "재고수량", "참고수량"]]
-
-                st.caption("※ 표에 값을 입력해도 즉시 저장/적용되지 않습니다. **✅ 엑셀에 적용하기**를 눌러야 엑셀에 반영됩니다.")
-                st.caption("※ '입력수량'을 비워두면 0으로 처리됩니다. (예: 엔다이브 - 0)")
-                st.caption("※ '참고수량'은 **💾 참고수량 저장**을 눌러야 저장되며, 저장 후에는 수정 전까지 유지됩니다.")
-
-                # 상품목록이 변경되면 편집 상태를 초기화하기 위해 key를 변경합니다.
-                _sig = hashlib.md5(("|".join(current_names)).encode("utf-8")).hexdigest()[:10]
-                _editor_key = f"qty_editor_{_sig}"
-
-
-                # data_editor가 rerun 때 값이 사라지는 것을 방지:
-                # - 같은 key의 widget state가 있으면 그 값을 우선 사용
-                # - 재고수량(표시용)만 매번 새로 갱신
-                _df_for_editor = df_view
-                if _editor_key in st.session_state and isinstance(st.session_state.get(_editor_key), pd.DataFrame):
-                    _prev = st.session_state.get(_editor_key).copy()
-                    try:
-                        if "상품" in _prev.columns:
-                            _prev["상품"] = _prev["상품"].astype(str)
-                            _prev = _prev.set_index("상품").reindex(current_names).reset_index()
-                    except Exception:
-                        _prev = df_view.copy()
-
-                    for _c in ["입력수량", "재고수량", "참고수량"]:
-                        if _c not in _prev.columns:
-                            _prev[_c] = ""
-
-                    _prev["재고수량"] = [stock_map.get(n, "") for n in _prev["상품"]]
-                    _df_for_editor = _prev[["상품", "입력수량", "재고수량", "참고수량"]]
-
-                df_edit = st.data_editor(
-                    _df_for_editor,
-                    key=_editor_key,
-                    use_container_width=True,
-                    num_rows="fixed",
-                    disabled=["상품", "재고수량"],
-                    column_config={
-                        "입력수량": st.column_config.TextColumn("입력수량", help="숫자 입력(음수/소수 가능). 예: 3, -2, 1.5"),
-                        "재고수량": st.column_config.TextColumn("재고수량", help="업로드한 엑셀 기준, 모든 옵션 재고 합(표시용)"),
-                        "참고수량": st.column_config.TextColumn("참고수량", help="메모/참고용 수량(저장 시 유지). 예: 10"),
-                    },
-                )
-
-
-                # 참고수량은 표에서 편집할 수 있지만, **💾 참고수량 저장**을 눌러야만 설정에 저장됩니다.
-
-                # ✅ 현재 표(편집중 값) 기준으로 입력값/메모 생성 (빈칸은 0)
-                df_inputs = df_edit.drop(columns=["재고수량", "참고수량"], errors="ignore").copy()
-
-                inputs: Dict[str, float] = {}
-                memo_lines: List[str] = []
-                for _, r in df_inputs.iterrows():
-                    name = str(r.get("상품", "")).strip()
-                    if not name:
-                        continue
-                    qty = parse_input_number(r.get("입력수량", ""))
-                    inputs[name] = qty
-                    memo_lines.append(f"{name} - {fmt_qty_for_memo(qty)}")
-                memo_text = "\n".join(memo_lines)
-
-                col_a, col_b, col_c = st.columns(3, gap="small")
-                with col_a:
-                    apply_clicked = st.button(
-                        "✅ 엑셀에 적용하기",
-                        disabled=(uploaded is None),
-                        use_container_width=True,
-                    )
-                with col_b:
-                    memo_filename = "주문내역.txt"
-                    st.download_button(
-                        "📝 메모장으로 저장",
-                        data=memo_text.encode("utf-8"),
-                        file_name=memo_filename,
-                        mime="text/plain",
-                        disabled=(len(memo_lines) == 0),
-                        help="현재 표(편집중 값) 기준으로 텍스트(.txt)를 다운로드합니다. (빈칸=0)",
-                        use_container_width=True,
-                    )
-                with col_c:
-                    ref_save_clicked = st.button(
-                        "💾 참고수량 저장",
-                        use_container_width=True,
-                        key=f"bulk_save_ref_qty_{_editor_key}",
-                    )
-
-                # 💾 참고수량 저장 처리(저장 후 수정 전까지 유지)
-                if ref_save_clicked:
-                    ref_map_new: Dict[str, Any] = {}
-                    for _, rr in df_edit.iterrows():
-                        pname = str(rr.get("상품", "")).strip()
-                        if not pname:
-                            continue
-
-                        raw = rr.get("참고수량", "")
-                        if raw is None:
-                            sval = ""
-                        elif isinstance(raw, (int, float)):
-                            sval = fmt_qty_for_memo(float(raw))
-                        else:
-                            sval = str(raw).strip()
-                            if sval != "":
-                                s_clean = sval.replace(",", "")
-                                if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s_clean):
-                                    sval = fmt_qty_for_memo(parse_input_number(sval))
-
-                        if sval == "":
-                            continue
-                        ref_map_new[pname] = sval
-
-                    cfg["ref_qty"] = ref_map_new
-                    save_config(cfg)
-                    st.success("참고수량 저장 완료!")
-                    st.rerun()
-
-                if apply_clicked:
-                    # ✅ 적용 버튼을 눌렀을 때만 '확정(저장)' + 엑셀 반영
-                    st.session_state.qty_committed_df = df_inputs.copy()
-
-                    if uploaded_bytes is None:
-                        st.warning("엑셀 파일을 업로드해 주세요.")
-                        st.session_state.last_apply_result = None
-                    else:
+                current_names = [str(p.get("name", "")).strip() for p in prod_list if str(p.get("name", "")).strip()]
+                if not current_names:
+                    st.info("상품목록이 비어있습니다. 사이드바의 '상품목록 관리'에서 상품을 먼저 추가하세요.")
+                else:
+                                # 입력값은 '✅ 엑셀에 적용하기'를 눌렀을 때만 확정(저장)됩니다.
+                    def _align_qty_df(_df: pd.DataFrame, _names: List[str]) -> pd.DataFrame:
                         try:
-                            updated_bytes, df_changes, df_missing, changed_rows_bytes = update_workbook_bytes(
-                                uploaded_bytes, cfg, inputs
-                            )
-                        except Exception as e:
-                            st.error(f"적용 중 오류: {e}")
+                            if _df is not None and not _df.empty and "상품" in _df.columns and "입력수량" in _df.columns:
+                                _m = _df.set_index("상품")["입력수량"].to_dict()
+                            else:
+                                _m = {}
+                        except Exception:
+                            _m = {}
+
+                        return pd.DataFrame(
+                            {
+                                "상품": _names,
+                                "입력수량": ["" if (_m.get(n) is None) else _m.get(n, "") for n in _names],
+                            }
+                        )
+
+                    # 마지막으로 '적용(확정)'된 값(=엑셀 적용에 사용되는 값)
+                    if "qty_committed_df" not in st.session_state:
+                        st.session_state.qty_committed_df = pd.DataFrame(
+                            {"상품": current_names, "입력수량": [""] * len(current_names)}
+                        )
+                    st.session_state.qty_committed_df = _align_qty_df(st.session_state.qty_committed_df, current_names)
+                    # --- 참고수량: 저장된 값(cfg["ref_qty"])만 표시합니다. (💾 참고수량 저장을 눌러야만 영구 저장됨) ---
+                    ref_saved = (cfg.get("ref_qty") or {})
+
+                    def _ref_saved_value(_name: str) -> str:
+                        v = ref_saved.get(_name)
+                        return "" if v is None else str(v)
+
+                    # 표 표시용(재고수량/참고수량은 표시/입력만)
+                    df_view = st.session_state.qty_committed_df.copy()
+                    df_view["재고수량"] = [stock_map.get(n, "") for n in df_view["상품"]]
+                    df_view["참고수량"] = [_ref_saved_value(n) for n in df_view["상품"]]
+                    df_view = df_view[["상품", "입력수량", "재고수량", "참고수량"]]
+
+                    st.caption("※ 표에 값을 입력해도 즉시 저장/적용되지 않습니다. **✅ 엑셀에 적용하기**를 눌러야 엑셀에 반영됩니다.")
+                    st.caption("※ '입력수량'을 비워두면 0으로 처리됩니다. (예: 엔다이브 - 0)")
+                    st.caption("※ '참고수량'은 **💾 참고수량 저장**을 눌러야 저장되며, 저장 후에는 수정 전까지 유지됩니다.")
+
+                    # 상품목록이 변경되면 편집 상태를 초기화하기 위해 key를 변경합니다.
+                    _sig = hashlib.md5(("|".join(current_names)).encode("utf-8")).hexdigest()[:10]
+                    _editor_key = f"qty_editor_{_sig}"
+
+
+                    # data_editor가 rerun 때 값이 사라지는 것을 방지:
+                    # - 같은 key의 widget state가 있으면 그 값을 우선 사용
+                    # - 재고수량(표시용)만 매번 새로 갱신
+                    _df_for_editor = df_view
+                    if _editor_key in st.session_state and isinstance(st.session_state.get(_editor_key), pd.DataFrame):
+                        _prev = st.session_state.get(_editor_key).copy()
+                        try:
+                            if "상품" in _prev.columns:
+                                _prev["상품"] = _prev["상품"].astype(str)
+                                _prev = _prev.set_index("상품").reindex(current_names).reset_index()
+                        except Exception:
+                            _prev = df_view.copy()
+
+                        for _c in ["입력수량", "재고수량", "참고수량"]:
+                            if _c not in _prev.columns:
+                                _prev[_c] = ""
+
+                        _prev["재고수량"] = [stock_map.get(n, "") for n in _prev["상품"]]
+                        _df_for_editor = _prev[["상품", "입력수량", "재고수량", "참고수량"]]
+
+                    df_edit = st.data_editor(
+                        _df_for_editor,
+                        key=_editor_key,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        disabled=["상품", "재고수량"],
+                        column_config={
+                            "입력수량": st.column_config.TextColumn("입력수량", help="숫자 입력(음수/소수 가능). 예: 3, -2, 1.5"),
+                            "재고수량": st.column_config.TextColumn("재고수량", help="업로드한 엑셀 기준, 모든 옵션 재고 합(표시용)"),
+                            "참고수량": st.column_config.TextColumn("참고수량", help="메모/참고용 수량(저장 시 유지). 예: 10"),
+                        },
+                    )
+
+
+                    # 참고수량은 표에서 편집할 수 있지만, **💾 참고수량 저장**을 눌러야만 설정에 저장됩니다.
+
+                    # ✅ 현재 표(편집중 값) 기준으로 입력값/메모 생성 (빈칸은 0)
+                    df_inputs = df_edit.drop(columns=["재고수량", "참고수량"], errors="ignore").copy()
+
+                    inputs: Dict[str, float] = {}
+                    memo_lines: List[str] = []
+                    for _, r in df_inputs.iterrows():
+                        name = str(r.get("상품", "")).strip()
+                        if not name:
+                            continue
+                        qty = parse_input_number(r.get("입력수량", ""))
+                        inputs[name] = qty
+                        memo_lines.append(f"{name} - {fmt_qty_for_memo(qty)}")
+                    memo_text = "\n".join(memo_lines)
+
+                    col_a, col_b, col_c = st.columns(3, gap="small")
+                    with col_a:
+                        apply_clicked = st.button(
+                            "✅ 엑셀에 적용하기",
+                            disabled=(uploaded is None),
+                            use_container_width=True,
+                        )
+                    with col_b:
+                        memo_filename = "주문내역.txt"
+                        st.download_button(
+                            "📝 메모장으로 저장",
+                            data=memo_text.encode("utf-8"),
+                            file_name=memo_filename,
+                            mime="text/plain",
+                            disabled=(len(memo_lines) == 0),
+                            help="현재 표(편집중 값) 기준으로 텍스트(.txt)를 다운로드합니다. (빈칸=0)",
+                            use_container_width=True,
+                        )
+                    with col_c:
+                        ref_save_clicked = st.button(
+                            "💾 참고수량 저장",
+                            use_container_width=True,
+                            key=f"bulk_save_ref_qty_{_editor_key}",
+                        )
+
+                    # 💾 참고수량 저장 처리(저장 후 수정 전까지 유지)
+                    if ref_save_clicked:
+                        ref_map_new: Dict[str, Any] = {}
+                        for _, rr in df_edit.iterrows():
+                            pname = str(rr.get("상품", "")).strip()
+                            if not pname:
+                                continue
+
+                            raw = rr.get("참고수량", "")
+                            if raw is None:
+                                sval = ""
+                            elif isinstance(raw, (int, float)):
+                                sval = fmt_qty_for_memo(float(raw))
+                            else:
+                                sval = str(raw).strip()
+                                if sval != "":
+                                    s_clean = sval.replace(",", "")
+                                    if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", s_clean):
+                                        sval = fmt_qty_for_memo(parse_input_number(sval))
+
+                            if sval == "":
+                                continue
+                            ref_map_new[pname] = sval
+
+                        cfg["ref_qty"] = ref_map_new
+                        save_config(cfg)
+                        st.success("참고수량 저장 완료!")
+                        st.rerun()
+
+                    if apply_clicked:
+                        # ✅ 적용 버튼을 눌렀을 때만 '확정(저장)' + 엑셀 반영
+                        st.session_state.qty_committed_df = df_inputs.copy()
+
+                        if uploaded_bytes is None:
+                            st.warning("엑셀 파일을 업로드해 주세요.")
                             st.session_state.last_apply_result = None
                         else:
-                            out_name_changed = "재고수량일괄변경.xlsx"
+                            try:
+                                updated_bytes, df_changes, df_missing, changed_rows_bytes = update_workbook_bytes(
+                                    uploaded_bytes, cfg, inputs
+                                )
+                            except Exception as e:
+                                st.error(f"적용 중 오류: {e}")
+                                st.session_state.last_apply_result = None
+                            else:
+                                out_name_changed = "재고수량일괄변경.xlsx"
 
-                            # ✅ 결과를 session_state에 저장 (메모장 다운로드 등 rerun에도 유지)
-                            st.session_state.last_apply_result = {
-                                "fingerprint": current_fp,
-                                "out_name": out_name_changed,
-                                "changed_rows_bytes": changed_rows_bytes,
-                                "df_changes": df_changes,
-                                "df_missing": df_missing,
-                                "applied_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            }
+                                # ✅ 결과를 session_state에 저장 (메모장 다운로드 등 rerun에도 유지)
+                                st.session_state.last_apply_result = {
+                                    "fingerprint": current_fp,
+                                    "out_name": out_name_changed,
+                                    "changed_rows_bytes": changed_rows_bytes,
+                                    "df_changes": df_changes,
+                                    "df_missing": df_missing,
+                                    "applied_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                }
 
-                # ✅ 마지막 적용 결과 표시(버튼/표가 rerun으로 사라지지 않음)
-                _last = st.session_state.get("last_apply_result")
-                if _last is not None:
-                    st.success(f"완료! 아래에서 다운로드하세요. (마지막 적용: {_last.get('applied_at', '')})")
+                    # ✅ 마지막 적용 결과 표시(버튼/표가 rerun으로 사라지지 않음)
+                    _last = st.session_state.get("last_apply_result")
+                    if _last is not None:
+                        st.success(f"완료! 아래에서 다운로드하세요. (마지막 적용: {_last.get('applied_at', '')})")
 
-                    st.download_button(
-                        "⬇️ 다운로드",
-                        data=_last["changed_rows_bytes"],
-                        file_name=_last["out_name"],
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        help="재고수량이 변경된 행(헤더 포함)만 남긴 파일입니다.",
-                        use_container_width=True,
-                        key=f"bulk_excel_dl_{_last.get('fingerprint', '')}",
-                    )
+                        st.download_button(
+                            "⬇️ 다운로드",
+                            data=_last["changed_rows_bytes"],
+                            file_name=_last["out_name"],
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            help="재고수량이 변경된 행(헤더 포함)만 남긴 파일입니다.",
+                            use_container_width=True,
+                            key=f"bulk_excel_dl_{_last.get('fingerprint', '')}",
+                        )
 
-                    df_changes = _last.get("df_changes")
-                    df_missing = _last.get("df_missing")
+                        df_changes = _last.get("df_changes")
+                        df_missing = _last.get("df_missing")
 
-                    if isinstance(df_changes, pd.DataFrame):
-                        if df_changes.empty:
-                            st.info("변경된 행이 없습니다. (키워드 매칭이 안 됐거나 입력이 0이거나, map 모드에서 입력값이 매핑에 없을 수 있어요)")
-                        else:
-                            st.dataframe(df_changes.drop(columns=["행번호"], errors="ignore"), use_container_width=True)
+                        if isinstance(df_changes, pd.DataFrame):
+                            if df_changes.empty:
+                                st.info("변경된 행이 없습니다. (키워드 매칭이 안 됐거나 입력이 0이거나, map 모드에서 입력값이 매핑에 없을 수 있어요)")
+                            else:
+                                st.dataframe(df_changes.drop(columns=["행번호"], errors="ignore"), use_container_width=True)
 
-                    if isinstance(df_missing, pd.DataFrame) and (not df_missing.empty):
-                        st.warning("⚠️ map(매핑) 규칙에서 '입력값 → 적용값'이 정의되지 않아 적용되지 않은 항목이 있습니다.")
-                        st.dataframe(df_missing, use_container_width=True)
+                        if isinstance(df_missing, pd.DataFrame) and (not df_missing.empty):
+                            st.warning("⚠️ map(매핑) 규칙에서 '입력값 → 적용값'이 정의되지 않아 적용되지 않은 항목이 있습니다.")
+                            st.dataframe(df_missing, use_container_width=True)
 
+        else:
+            st.subheader("자동 실행")
+            st.caption("시작 버튼을 누르면 텔레그램으로 [현재 재고 수량]을 보내고, 첫 번째 유효한 답장 1개를 받으면 자동 반영합니다.")
+
+            auto_state = st.session_state.get("bulk_auto_state")
+            if not isinstance(auto_state, dict):
+                auto_state = {
+                    "status": "idle",
+                    "polling": False,
+                    "error": "",
+                    "message_text": "",
+                    "reply_text": "",
+                    "memo_text": "",
+                    "summary_text": "",
+                    "base_update_id": 0,
+                    "sent_at": 0,
+                    "names": [],
+                    "products_records": [],
+                    "processed_update_id": None,
+                    "last_check_at": "",
+                    "run_id": "",
+                }
+                st.session_state.bulk_auto_state = auto_state
+
+            col1, col2 = st.columns(2, gap="small")
+            with col1:
+                start_auto = st.button("▶ 자동 실행 시작", use_container_width=True, key="bulk_auto_start")
+            with col2:
+                stop_auto = st.button("⏹ 자동 실행 중지", use_container_width=True, key="bulk_auto_stop")
+
+            if stop_auto:
+                auto_state["polling"] = False
+                auto_state["status"] = "stopped"
+                st.session_state.bulk_auto_state = auto_state
+                st.info("자동 실행을 중지했습니다.")
+
+            if start_auto:
+                missing_env = _get_required_auto_env_missing()
+                if missing_env:
+                    auto_state.update({"status": "error", "polling": False, "error": "필수 환경변수가 없습니다: " + ", ".join(missing_env)})
+                    st.session_state.bulk_auto_state = auto_state
+                else:
+                    try:
+                        df_products = fetch_naver_products_df()
+                        stock_map = compute_stock_display_map_from_df(df_products, cfg)
+                        current_names = [str(p.get("name", "")).strip() for p in cfg.get("products", []) if str(p.get("name", "")).strip()]
+                        base_update_id = _get_latest_update_id()
+                        message_text = build_current_stock_message(current_names, stock_map)
+                        telegram_send_message(message_text)
+                    except Exception as e:
+                        auto_state.update({"status": "error", "polling": False, "error": str(e)})
+                        st.session_state.bulk_auto_state = auto_state
+                    else:
+                        auto_state = {
+                            "status": "waiting_reply",
+                            "polling": True,
+                            "error": "",
+                            "message_text": message_text,
+                            "reply_text": "",
+                            "memo_text": "",
+                            "summary_text": "",
+                            "base_update_id": int(base_update_id),
+                            "sent_at": int(time.time()),
+                            "names": current_names,
+                            "products_records": df_products.to_dict(orient="records"),
+                            "processed_update_id": None,
+                            "last_check_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "run_id": now_prefix_kst(),
+                        }
+                        st.session_state.bulk_auto_state = auto_state
+                        st.success("텔레그램으로 [현재 재고 수량]을 전송했습니다. 첫 번째 유효한 답장을 기다립니다.")
+                        st.rerun()
+
+            auto_state = st.session_state.get("bulk_auto_state") or {}
+            status = auto_state.get("status", "idle")
+            poll_active = bool(auto_state.get("polling"))
+
+            if status == "error" and auto_state.get("error"):
+                st.error(auto_state.get("error"))
+            elif status == "done":
+                st.success("자동 반영이 완료되었습니다.")
+            elif status == "stopped":
+                st.info("자동 실행이 중지되었습니다.")
+            elif poll_active:
+                st.info("텔레그램 첫 답장 1개를 기다리는 중입니다.")
+            else:
+                st.caption("자동 실행 시작을 누르면 텔레그램 답장을 자동 확인합니다.")
+
+            if auto_state.get("message_text"):
+                st.text(auto_state.get("message_text"))
+            if auto_state.get("reply_text"):
+                st.caption("처리된 답장")
+                st.text(auto_state.get("reply_text"))
+            if auto_state.get("memo_text"):
+                st.caption("전송된 메모")
+                st.text(auto_state.get("memo_text"))
+            if auto_state.get("summary_text"):
+                st.caption("최종 결과")
+                st.text(auto_state.get("summary_text"))
+            if auto_state.get("last_check_at"):
+                st.caption(f"마지막 확인: {auto_state.get('last_check_at')}")
+
+            if poll_active and status == "waiting_reply":
+                try:
+                    updates = telegram_get_updates(offset=int(auto_state.get("base_update_id", 0)) + 1)
+                    valid_update = None
+                    for upd in updates:
+                        try:
+                            update_id = int(upd.get("update_id") or 0)
+                        except Exception:
+                            continue
+                        msg = upd.get("message") or upd.get("edited_message") or {}
+                        chat = msg.get("chat") or {}
+                        if str(chat.get("id") or "") != str(TELEGRAM_CHAT_ID):
+                            continue
+                        if int(msg.get("date") or 0) < int(auto_state.get("sent_at") or 0):
+                            continue
+                        text_msg = str(msg.get("text") or "").strip()
+                        ok, parsed_reply, _err = parse_first_reply_message(text_msg, len(auto_state.get("names") or []))
+                        if ok:
+                            valid_update = (update_id, text_msg, parsed_reply)
+                            break
+                    auto_state["last_check_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if valid_update is not None:
+                        update_id, reply_text, parsed_reply = valid_update
+                        auto_state["reply_text"] = reply_text
+                        auto_state["processed_update_id"] = update_id
+                        names = auto_state.get("names") or []
+                        inputs = build_auto_inputs(names, parsed_reply)
+                        memo_text = build_auto_memo_text(names, inputs)
+                        auto_state["memo_text"] = memo_text
+                        telegram_send_message(memo_text)
+                        df_products = pd.DataFrame(auto_state.get("products_records") or [])
+                        _updated_df, df_changes, df_missing = apply_actions_to_products_df(df_products, cfg, inputs)
+                        df_to_push = df_changes.copy() if isinstance(df_changes, pd.DataFrame) else pd.DataFrame()
+                        if not df_to_push.empty:
+                            df_to_push = df_to_push[df_to_push["증감"].astype(float) > 0].copy()
+                        api_result = push_stock_updates(df_to_push)
+                        summary_text = summarize_auto_result(api_result.get("sent", 0), df_changes, df_missing, api_result)
+                        auto_state["summary_text"] = summary_text
+                        auto_state["status"] = "done"
+                        auto_state["polling"] = False
+                        st.session_state.bulk_auto_state = auto_state
+                        telegram_send_message(summary_text)
+                        st.rerun()
+                    st.session_state.bulk_auto_state = auto_state
+                    time.sleep(TELEGRAM_AUTO_POLL_SECONDS)
+                    st.rerun()
+                except Exception as e:
+                    auto_state["status"] = "error"
+                    auto_state["polling"] = False
+                    auto_state["error"] = str(e)
+                    st.session_state.bulk_auto_state = auto_state
+                    st.rerun()
     elif page.startswith("②"):
         st.subheader("상품목록 추가/삭제/수정")
 
