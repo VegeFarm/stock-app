@@ -5023,25 +5023,141 @@ def render_bulk_stock_page():
         return df.drop_duplicates(subset=["originProductNo", "channelProductNo", "name"]).reset_index(drop=True)
 
     def compute_stock_display_map_from_df(df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, str]:
-        product_display_map: Dict[str, str] = {}
+        """
+        중계서버에서 받은 상품 DataFrame에도 수동 모드와 같은 방식으로
+        상품목록관리/규칙관리 기준 재고 표시를 적용합니다.
+        """
+        out: Dict[str, str] = {}
         if df_products is None or df_products.empty:
-            return product_display_map
+            return out
+
+        recog_logic = _get_recognition_logic(cfg)
+        products = cfg.get("products", []) or []
+        base_kw: Dict[str, str] = {}
+        for p in products:
+            bn = str(p.get("name", "")).strip()
+            kw = str(p.get("keyword") or p.get("name") or "").strip()
+            if bn:
+                base_kw[bn] = kw or bn
+
+        bases_sorted = sorted(
+            [(bn, base_kw.get(bn, bn)) for bn in base_kw.keys()],
+            key=lambda x: len(str(x[1] or "")),
+            reverse=True,
+        )
+        if not bases_sorted:
+            return out
+
+        rules_map = cfg.get("rules", {}) or {}
+
+        def _scoped_tokens(base_keyword: str, rule_keyword: str) -> List[str]:
+            base_keyword = str(base_keyword or "").strip()
+            rule_keyword = str(rule_keyword or "").strip()
+            if not rule_keyword:
+                return []
+            if not base_keyword:
+                return [rule_keyword]
+            if base_keyword in rule_keyword:
+                return [rule_keyword]
+            return [base_keyword, rule_keyword]
+
+        def _match_tokens(tokens: List[str], name_str: str) -> bool:
+            return bool(tokens) and all((t in name_str) for t in tokens)
+
+        matchers_by_base: Dict[str, List[Dict[str, Any]]] = {}
+        unit_pref: Dict[str, str] = {}
+        unit_seen: Dict[str, str] = {}
+
+        for bn, bkw in bases_sorted:
+            rs = rules_map.get(bn, []) or []
+            ms: List[Dict[str, Any]] = []
+            unit_counts: Dict[str, int] = {}
+
+            for i, r in enumerate(rs):
+                rr = Rule.from_dict(r)
+                if not rr.keyword:
+                    continue
+                tokens = _scoped_tokens(bkw, rr.keyword)
+                if not tokens:
+                    continue
+                factor, unit = _parse_factor_and_unit(rr.keyword, recog_logic)
+                ms.append({
+                    "tokens": tokens,
+                    "keyword": rr.keyword,
+                    "factor": factor,
+                    "unit": unit,
+                    "order": i,
+                })
+                if unit:
+                    unit_counts[unit] = unit_counts.get(unit, 0) + 1
+
+            ms.sort(
+                key=lambda m: (sum(len(t) for t in m["tokens"]), len(m["tokens"]), len(m["keyword"])),
+                reverse=True,
+            )
+            matchers_by_base[bn] = ms
+
+            if unit_counts.get("kg", 0) > 0:
+                unit_pref[bn] = "kg"
+            elif unit_counts:
+                unit_pref[bn] = sorted(unit_counts.items(), key=lambda kv: (kv[1], len(kv[0])), reverse=True)[0][0]
+            else:
+                unit_pref[bn] = ""
+
+        totals: Dict[str, Decimal] = {}
+
         for _, row in df_products.iterrows():
-            actual_name = str(row.get("name") or "").strip()
-            if not actual_name:
+            name_str = str(row.get("name") or "").strip()
+            if not name_str:
                 continue
-            for p in cfg.get("products", []):
-                display_name = str(p.get("name") or "").strip()
-                if not display_name:
-                    continue
-                pattern = str(p.get("pattern") or p.get("keyword") or display_name).strip()
-                if not pattern:
-                    continue
-                if pattern in actual_name:
-                    qty = float(row.get("stockQuantity") or 0)
-                    product_display_map[display_name] = fmt_qty_no_zero(qty)
+
+            base_name = None
+            for bn, kw in bases_sorted:
+                if kw and kw in name_str:
+                    base_name = bn
                     break
-        return product_display_map
+            if base_name is None:
+                continue
+
+            inv_qty = _cell_to_decimal(row.get("stockQuantity"))
+            if inv_qty == 0:
+                continue
+
+            chosen = None
+            for m in matchers_by_base.get(base_name, []):
+                if _match_tokens(m["tokens"], name_str):
+                    chosen = m
+                    break
+
+            has_rules = bool(matchers_by_base.get(base_name))
+            if chosen and chosen.get("unit"):
+                factor = chosen["factor"]
+                unit = chosen["unit"]
+            else:
+                if has_rules and chosen is None:
+                    continue
+                factor, unit = _parse_factor_and_unit(name_str, recog_logic)
+
+            pref = unit_pref.get(base_name, "") or ""
+            if pref:
+                unit_seen[base_name] = pref
+            elif unit:
+                unit_seen[base_name] = unit_seen.get(base_name) or unit
+
+            totals[base_name] = totals.get(base_name, Decimal("0")) + (inv_qty * factor)
+
+        for bn, _kw in bases_sorted:
+            total = totals.get(bn, Decimal("0"))
+            if total == 0:
+                out[bn] = "0"
+                continue
+            unit = unit_pref.get(bn, "") or unit_seen.get(bn, "") or ""
+            if unit == "kg":
+                out[bn] = f"{_fmt_decimal(total, max_decimals=3)}kg"
+            else:
+                s = _fmt_decimal(total, max_decimals=3)
+                out[bn] = f"{s}{unit}" if unit else s
+        return out
 
     def apply_auto_stock_to_df(df_work: pd.DataFrame, df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         df2 = df_work.copy()
@@ -5164,12 +5280,9 @@ def render_bulk_stock_page():
         return "\n".join(lines)
 
     def build_input_template_message(current_names: List[str]) -> str:
-        lines = ["[입고수량 입력 템플릿]"]
+        lines = []
         for i, _name in enumerate(current_names, start=1):
             lines.append(f"{i} 0")
-        lines.append("")
-        lines.append("위 템플릿을 그대로 복사해서 수량만 수정 후 한 번에 보내주세요.")
-        lines.append("입력 후에는 '확정' 또는 '취소'를 보내주세요.")
         return "\n".join(lines)
 
     def build_invalid_reply_message(current_names: List[str], error_text: str) -> str:
@@ -5587,7 +5700,7 @@ def render_bulk_stock_page():
 
         else:
             st.subheader("자동 실행")
-            st.caption("시작 버튼을 누르면 텔레그램으로 현재 재고와 0으로 채워진 입력 템플릿을 보내고, 답장 확인 후 확정/취소를 기다립니다.")
+            st.caption("시작 버튼을 누르면 텔레그램으로 0 템플릿을 먼저 보내고, 그 다음 현재 재고 수량을 보낸 뒤 확정/취소를 기다립니다.")
 
             auto_state = st.session_state.get("bulk_auto_state")
             if not isinstance(auto_state, dict):
@@ -5642,8 +5755,8 @@ def render_bulk_stock_page():
                         base_update_id = _get_latest_update_id()
                         message_text = build_current_stock_message(current_names, stock_map)
                         template_text = build_input_template_message(current_names)
-                        telegram_send_message(message_text)
                         telegram_send_message(template_text)
+                        telegram_send_message(message_text)
                     except Exception as e:
                         auto_state.update({"status": "error", "polling": False, "error": str(e)})
                         st.session_state.bulk_auto_state = auto_state
