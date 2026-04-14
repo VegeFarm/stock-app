@@ -4448,57 +4448,71 @@ def render_bulk_stock_page():
         return s if s else "0"
 
 
+    def compute_stock_display_map(xlsx_bytes: bytes, cfg: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Build display stock totals per base product using **규칙관리 키워드**를 참고하여 계산합니다.
 
-    def _get_base_keyword_map(cfg: Dict[str, Any]) -> Dict[str, str]:
+        - 각 기준상품(base)에 대해 규칙(키워드)을 이용해 옵션 단위를 파악합니다.
+          예) '1kg', '500g', '100g' -> kg(합산),  '5팩' -> 팩,  '6통' -> 통
+        - 엑셀의 각 행(상품명)을 규칙 키워드와 매칭하여, 재고수량 * (옵션 단위 수량) 를 합산합니다.
+          예) 양상추6통:3개 + 양상추1통:3개 => 3*6 + 3*1 = 21통
+
+        Stock 없는 경우는 '0'으로 표시합니다.
+        """
+        inv_col = cfg.get("inventory_column", "재고수량")
+        name_col = cfg.get("name_column", "상품명")
+        recog_logic = _get_recognition_logic(cfg)
+
+        wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+        ws = wb.active
+        header_row, name_idx, inv_idx = find_header_row_and_columns(ws, name_col=name_col, inv_col=inv_col)
+
+        products = cfg.get("products", []) or []
         base_kw: Dict[str, str] = {}
-        for p in cfg.get("products", []) or []:
+        for p in products:
             bn = str(p.get("name", "")).strip()
             kw = str(p.get("keyword") or p.get("name") or "").strip()
             if bn:
                 base_kw[bn] = kw or bn
-        return base_kw
 
-
-    def _scoped_rule_tokens(base_keyword: str, rule_keyword: str) -> List[str]:
-        base_keyword = str(base_keyword or "").strip()
-        rule_keyword = str(rule_keyword or "").strip()
-        if not rule_keyword:
-            return []
-        if not base_keyword:
-            return [rule_keyword]
-        if base_keyword in rule_keyword:
-            return [rule_keyword]
-        return [base_keyword, rule_keyword]
-
-
-    def _build_display_rule_matchers(cfg: Dict[str, Any]):
-        recog_logic = _get_recognition_logic(cfg)
-        base_kw = _get_base_keyword_map(cfg)
-        bases_sorted = sorted(
-            [(bn, base_kw.get(bn, bn)) for bn in base_kw.keys()],
-            key=lambda x: len(str(x[1] or "")),
-            reverse=True,
-        )
+        bases_sorted = sorted([(bn, base_kw.get(bn, bn)) for bn in base_kw.keys()], key=lambda x: len(str(x[1] or "")), reverse=True)
 
         rules_map = cfg.get("rules", {}) or {}
+
+        def _scoped_tokens(base_keyword: str, rule_keyword: str) -> List[str]:
+            base_keyword = str(base_keyword or "").strip()
+            rule_keyword = str(rule_keyword or "").strip()
+            if not rule_keyword:
+                return []
+            if not base_keyword:
+                return [rule_keyword]
+            # If user already typed full keyword incl base keyword, treat as absolute substring match
+            if base_keyword in rule_keyword:
+                return [rule_keyword]
+            # Otherwise require BOTH base keyword and rule keyword
+            return [base_keyword, rule_keyword]
+
+        # Build matchers from rules (per base)
         matchers_by_base: Dict[str, List[Dict[str, Any]]] = {}
         unit_pref: Dict[str, str] = {}
+        unit_seen: Dict[str, str] = {}
 
         for bn, bkw in bases_sorted:
             rs = rules_map.get(bn, []) or []
             ms: List[Dict[str, Any]] = []
-            unit_counts: Dict[str, int] = {}
 
+            unit_counts: Dict[str, int] = {}
             for i, r in enumerate(rs):
                 rr = Rule.from_dict(r)
                 if not rr.keyword:
                     continue
 
-                tokens = _scoped_rule_tokens(bkw, rr.keyword)
+                tokens = _scoped_tokens(bkw, rr.keyword)
                 if not tokens:
                     continue
 
                 factor, unit = _parse_factor_and_unit(rr.keyword, recog_logic)
+
                 ms.append(
                     {
                         "tokens": tokens,
@@ -4508,15 +4522,18 @@ def render_bulk_stock_page():
                         "order": i,
                     }
                 )
+
                 if unit:
                     unit_counts[unit] = unit_counts.get(unit, 0) + 1
 
+            # Sort by specificity (longer/ more tokens first)
             ms.sort(
                 key=lambda m: (sum(len(t) for t in m["tokens"]), len(m["tokens"]), len(m["keyword"])),
                 reverse=True,
             )
             matchers_by_base[bn] = ms
 
+            # Preferred unit: kg wins if any kg/g exists; else most frequent unit in rules
             if unit_counts.get("kg", 0) > 0:
                 unit_pref[bn] = "kg"
             elif unit_counts:
@@ -4524,27 +4541,19 @@ def render_bulk_stock_page():
             else:
                 unit_pref[bn] = ""
 
-        return recog_logic, bases_sorted, matchers_by_base, unit_pref
-
-
-    def _build_stock_display_map_from_named_rows(named_rows: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Dict[str, str]:
-        """
-        수동/자동 공용 재고 표시 계산.
-        named_rows: [{"name": "실제상품명", "stockQuantity": 3}, ...]
-        규칙관리/인식로직을 그대로 사용해 상품별 표시 재고를 계산합니다.
-        """
-        recog_logic, bases_sorted, matchers_by_base, unit_pref = _build_display_rule_matchers(cfg)
         totals: Dict[str, Decimal] = {}
-        unit_seen: Dict[str, str] = {}
 
         def _match_tokens(tokens: List[str], name_str: str) -> bool:
             return bool(tokens) and all((t in name_str) for t in tokens)
 
-        for row in named_rows or []:
-            name_str = str(row.get("name") or "").strip()
-            if not name_str:
+        for r in range(header_row + 1, ws.max_row + 1):
+            name_val = ws.cell(r, name_idx).value
+            if name_val is None or str(name_val).strip() == "":
                 continue
 
+            name_str = str(name_val)
+
+            # determine base product by base keyword
             base_name = None
             for bn, kw in bases_sorted:
                 if kw and kw in name_str:
@@ -4553,10 +4562,11 @@ def render_bulk_stock_page():
             if base_name is None:
                 continue
 
-            inv_qty = _cell_to_decimal(row.get("stockQuantity"))
+            inv_qty = _cell_to_decimal(ws.cell(r, inv_idx).value)
             if inv_qty == 0:
                 continue
 
+            # 1) Try rules-based matching first
             chosen = None
             for m in matchers_by_base.get(base_name, []):
                 if _match_tokens(m["tokens"], name_str):
@@ -4568,16 +4578,21 @@ def render_bulk_stock_page():
                 factor = chosen["factor"]
                 unit = chosen["unit"]
             else:
+                # ✅ 규칙이 있는 기준상품은 "규칙에 매칭되는 옵션"만 합산 (단위 혼합 방지)
+                # 규칙이 있는데 어떤 키워드에도 안 걸리면, 해당 행은 재고 합산에서 제외합니다.
                 if has_rules and chosen is None:
                     continue
+                # 2) Fallback: parse from actual name (kg/g/팩/봉/통/개/박스)
                 factor, unit = _parse_factor_and_unit(name_str, recog_logic)
 
+            # Track unit seen (if rules did not define a preferred unit)
             pref = unit_pref.get(base_name, "") or ""
             if pref:
                 unit_seen[base_name] = pref
             elif unit:
                 unit_seen[base_name] = unit_seen.get(base_name) or unit
 
+            # Sum: inv_qty * factor (factor already normalized: g -> kg)
             totals[base_name] = totals.get(base_name, Decimal("0")) + (inv_qty * factor)
 
         out: Dict[str, str] = {}
@@ -4595,33 +4610,6 @@ def render_bulk_stock_page():
                 out[bn] = f"{s}{unit}" if unit else s
 
         return out
-
-
-    def compute_stock_display_map(xlsx_bytes: bytes, cfg: Dict[str, Any]) -> Dict[str, str]:
-        """
-        업로드한 엑셀 기준으로 규칙관리/인식로직을 반영한 표시 재고를 계산합니다.
-        자동 실행도 동일한 계산식을 사용합니다.
-        """
-        inv_col = cfg.get("inventory_column", "재고수량")
-        name_col = cfg.get("name_column", "상품명")
-
-        wb = load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
-        ws = wb.active
-        header_row, name_idx, inv_idx = find_header_row_and_columns(ws, name_col=name_col, inv_col=inv_col)
-
-        named_rows: List[Dict[str, Any]] = []
-        for r in range(header_row + 1, ws.max_row + 1):
-            name_val = ws.cell(r, name_idx).value
-            if name_val is None or str(name_val).strip() == "":
-                continue
-            named_rows.append(
-                {
-                    "name": str(name_val),
-                    "stockQuantity": ws.cell(r, inv_idx).value,
-                }
-            )
-
-        return _build_stock_display_map_from_named_rows(named_rows, cfg)
 
 
     # ----------------------------
@@ -4905,6 +4893,7 @@ def render_bulk_stock_page():
     TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     TELEGRAM_AUTO_POLL_SECONDS = max(2, int((os.environ.get("TELEGRAM_AUTO_POLL_SECONDS") or "5").strip() or "5"))
+    TELEGRAM_AUTO_TIMEOUT_SECONDS = max(60, int((os.environ.get("TELEGRAM_AUTO_TIMEOUT_SECONDS") or "1200").strip() or "1200"))
 
     def _safe_json(resp):
         try:
@@ -5033,146 +5022,99 @@ def render_bulk_stock_page():
             raise RuntimeError("중계서버를 통해 받은 네이버 상품 조회 결과가 없습니다. NAVER_PRODUCT_SEARCH_BODY 또는 중계서버 응답을 확인해 주세요.")
         return df.drop_duplicates(subset=["originProductNo", "channelProductNo", "name"]).reset_index(drop=True)
 
-
     def compute_stock_display_map_from_df(df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Dict[str, str]:
-        named_rows: List[Dict[str, Any]] = []
+        product_display_map: Dict[str, str] = {}
         if df_products is None or df_products.empty:
-            return _build_stock_display_map_from_named_rows(named_rows, cfg)
-
+            return product_display_map
         for _, row in df_products.iterrows():
-            actual_name = str(row.get("name") or row.get("실제상품명") or "").strip()
-            if not actual_name:
-                continue
-            qty_raw = row.get("stockQuantity", row.get("현재재고", row.get("재고수량", 0)))
-            named_rows.append({"name": actual_name, "stockQuantity": qty_raw})
-
-        return _build_stock_display_map_from_named_rows(named_rows, cfg)
-
-
-    def apply_actions_to_products_df(df_products: pd.DataFrame, cfg: Dict[str, Any], inputs: Dict[str, float]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """
-        자동 실행용: 수동 엑셀 적용과 동일한 build_actions() 규칙 결과를
-        네이버 실시간 상품 목록 DataFrame에 적용합니다.
-        """
-        df2 = df_products.copy() if df_products is not None else pd.DataFrame()
-        if df2.empty:
-            return df2, pd.DataFrame(), pd.DataFrame()
-
-        if "name" not in df2.columns:
-            if "실제상품명" in df2.columns:
-                df2["name"] = df2["실제상품명"]
-            else:
-                df2["name"] = ""
-        if "stockQuantity" not in df2.columns:
-            if "현재재고" in df2.columns:
-                df2["stockQuantity"] = df2["현재재고"]
-            else:
-                df2["stockQuantity"] = 0
-
-        actions, df_missing = build_actions(cfg, inputs)
-        changes: List[Dict[str, Any]] = []
-
-        def _match_action(a: Dict[str, Any], name_str: str) -> bool:
-            toks = a.get("match_tokens") or []
-            return bool(toks) and all((t in name_str) for t in toks)
-
-        for i, row in df2.iterrows():
             actual_name = str(row.get("name") or "").strip()
             if not actual_name:
                 continue
-
-            matched = [a for a in actions if _match_action(a, actual_name)]
-            if not matched:
-                continue
-
-            delta = sum(float(a.get("delta") or 0.0) for a in matched)
-            if abs(delta) < 1e-12:
-                continue
-
-            before_qty = to_number(row.get("stockQuantity"))
-            after_qty = before_qty + delta
-            df2.at[i, "stockQuantity"] = after_qty
-
-            origin_no = row.get("originProductNo")
-            try:
-                origin_no = int(origin_no) if origin_no is not None and str(origin_no).strip() != "" else None
-            except Exception:
-                origin_no = None
-
-            changes.append(
-                {
-                    "상품명": actual_name,
-                    "기존재고": before_qty,
-                    "증감": delta,
-                    "최종재고": after_qty,
-                    "매칭키워드": ", ".join([str(a.get("display") or " & ".join(a.get("match_tokens", []))) for a in matched]),
-                    "원천상품": ", ".join(sorted({b for a in matched for b in a.get("bases", [])})),
-                    "originProductNo": origin_no,
-                    "channelProductNo": row.get("channelProductNo"),
-                    "실제상품명": actual_name,
-                }
-            )
-
-        return df2, pd.DataFrame(changes), df_missing
-
+            for p in cfg.get("products", []):
+                display_name = str(p.get("name") or "").strip()
+                if not display_name:
+                    continue
+                pattern = str(p.get("pattern") or p.get("keyword") or display_name).strip()
+                if not pattern:
+                    continue
+                if pattern in actual_name:
+                    qty = float(row.get("stockQuantity") or 0)
+                    product_display_map[display_name] = fmt_qty_no_zero(qty)
+                    break
+        return product_display_map
 
     def apply_auto_stock_to_df(df_work: pd.DataFrame, df_products: pd.DataFrame, cfg: Dict[str, Any]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """
-        하위 호환용 래퍼. 현재 자동 모드는 apply_actions_to_products_df()를 사용합니다.
-        """
-        inputs: Dict[str, float] = {}
-        if df_work is not None and not df_work.empty:
-            for _, work_row in df_work.iterrows():
-                product = str(work_row.get("상품") or "").strip()
-                if not product:
-                    continue
-                try:
-                    inputs[product] = float(work_row.get("입력수량") or 0.0)
-                except Exception:
-                    inputs[product] = 0.0
-        return apply_actions_to_products_df(df_products, cfg, inputs)
+        df2 = df_work.copy()
+        current_rows = []
+        for _, row in df_products.iterrows():
+            current_rows.append({
+                "originProductNo": row.get("originProductNo"),
+                "channelProductNo": row.get("channelProductNo"),
+                "실제상품명": row.get("name"),
+                "현재재고": float(row.get("stockQuantity") or 0),
+            })
+        current_df = pd.DataFrame(current_rows)
+        changes: List[Dict[str, Any]] = []
+        missing: List[Dict[str, Any]] = []
 
+        for i, work_row in df2.iterrows():
+            product = str(work_row.get("상품") or "").strip()
+            try:
+                input_qty = float(work_row.get("입력수량") or 0)
+            except Exception:
+                input_qty = 0.0
+            if input_qty <= 0:
+                continue
+            cfg_row = None
+            for p in cfg.get("products", []):
+                if str(p.get("name") or "").strip() == product:
+                    cfg_row = p
+                    break
+            pattern = str((cfg_row or {}).get("pattern") or (cfg_row or {}).get("keyword") or product).strip()
+            matched = current_df[current_df["실제상품명"].astype(str).str.contains(re.escape(pattern), na=False)] if pattern else current_df.iloc[0:0]
+            if matched.empty:
+                missing.append({"상품": product, "패턴": pattern, "사유": "매칭 실패"})
+                continue
+            target = matched.iloc[0]
+            before_qty = float(target.get("현재재고") or 0)
+            after_qty = before_qty + input_qty
+            df2.at[i, "재고수량"] = fmt_qty_no_zero(after_qty)
+            changes.append({
+                "상품": product,
+                "입력수량": input_qty,
+                "현재재고": before_qty,
+                "최종재고": after_qty,
+                "originProductNo": int(target.get("originProductNo")),
+                "channelProductNo": target.get("channelProductNo"),
+                "실제상품명": str(target.get("실제상품명") or ""),
+                "패턴": pattern,
+            })
+        return df2, pd.DataFrame(changes), pd.DataFrame(missing)
 
     def build_multi_update_payload(df_changes: pd.DataFrame) -> Dict[str, Any]:
-        """
-        중계서버/백엔드 버전에 따라 재고 일괄수정 요청 필드명이 다를 수 있어
-        items 와 multiProductUpdateRequestVos 를 동시에 보냅니다.
-        """
-        items_map: Dict[int, int] = {}
+        items: List[Dict[str, Any]] = []
         if df_changes is None or df_changes.empty:
-            return {"items": [], "multiProductUpdateRequestVos": []}
-
+            return {"items": []}
         for _, row in df_changes.iterrows():
             try:
+                qty = int(round(float(row.get("최종재고", 0))))
                 origin_no = int(row.get("originProductNo"))
             except Exception:
                 continue
-
-            try:
-                qty = int(round(float(row.get("최종재고", 0))))
-            except Exception:
-                qty = 0
-
-            if qty < 0:
-                qty = 0
-            items_map[origin_no] = qty
-
-        rows = [{"originProductNo": origin_no, "stockQuantity": qty} for origin_no, qty in items_map.items()]
-        return {
-            "items": rows,
-            "multiProductUpdateRequestVos": rows,
-        }
+            if qty <= 0:
+                continue
+            items.append({"originProductNo": origin_no, "stockQuantity": qty})
+        return {"items": items}
 
     def push_stock_updates(df_changes: pd.DataFrame) -> Dict[str, Any]:
         payload = build_multi_update_payload(df_changes)
-        payload_items = payload.get("multiProductUpdateRequestVos") or payload.get("items") or []
-        if not payload_items:
+        if not payload.get("items"):
             return {"sent": 0, "response": {"message": "변경 대상 없음"}, "payload": payload}
         data = _relay_request("/naver/stock/update", json_body=payload)
         try:
-            sent_count = int(data.get("sent_count") or len(payload_items))
+            sent_count = int(data.get("sent_count") or len(payload.get("items") or []))
         except Exception:
-            sent_count = len(payload_items)
+            sent_count = len(payload.get("items") or [])
         return {"sent": sent_count, "response": data.get("data") or data, "payload": payload, "relay": data}
 
     def _telegram_request(method: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -5221,6 +5163,24 @@ def render_bulk_stock_page():
             lines.append(f"{i}. {name} {stock_map.get(name, '0')}")
         return "\n".join(lines)
 
+    def build_input_template_message(current_names: List[str]) -> str:
+        lines = ["[입고수량 입력 템플릿]"]
+        for i, _name in enumerate(current_names, start=1):
+            lines.append(f"{i} 0")
+        lines.append("")
+        lines.append("위 템플릿을 그대로 복사해서 수량만 수정 후 한 번에 보내주세요.")
+        lines.append("입력 후에는 '확정' 또는 '취소'를 보내주세요.")
+        return "\n".join(lines)
+
+    def build_invalid_reply_message(current_names: List[str], error_text: str) -> str:
+        lines = ["[입력 형식 오류]", str(error_text).strip(), "", "아래 형식으로 다시 보내주세요."]
+        sample_count = min(5, len(current_names))
+        for i in range(1, sample_count + 1):
+            lines.append(f"{i} 0")
+        lines.append("")
+        lines.append("전체를 다시 보내거나, '취소'를 보내면 자동 실행을 중지합니다.")
+        return "\n".join(lines)
+
     def parse_number_qty_reply(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
         parsed: Dict[int, float] = {}
         lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
@@ -5248,6 +5208,15 @@ def render_bulk_stock_page():
 
     def build_auto_memo_text(current_names: List[str], inputs: Dict[str, float]) -> str:
         return "\n".join([f"{name} - {fmt_qty_for_memo(float(inputs.get(name, 0.0) or 0.0))}" for name in current_names])
+
+    def build_confirmation_message(current_names: List[str], inputs: Dict[str, float]) -> str:
+        lines = ["[반영 예정 확인]"]
+        for i, name in enumerate(current_names, start=1):
+            lines.append(f"{i}. {name} {fmt_qty_for_memo(float(inputs.get(name, 0.0) or 0.0))}")
+        lines.append("")
+        lines.append("맞으면 '확정', 중지하려면 '취소'를 보내주세요.")
+        lines.append("수정하려면 템플릿 전체를 다시 보내도 됩니다.")
+        return "\n".join(lines)
 
     def summarize_auto_result(sent_count: int, df_changes: pd.DataFrame, df_missing: pd.DataFrame, api_result: Dict[str, Any]) -> str:
         changed_count = 0 if df_changes is None else int(len(df_changes))
@@ -5282,6 +5251,53 @@ def render_bulk_stock_page():
 
     def parse_first_reply_message(text: str, max_index: int) -> Tuple[bool, Dict[int, float], str]:
         return parse_number_qty_reply(text, max_index)
+
+    def is_cancel_message(text: str) -> bool:
+        return str(text or "").strip() == "취소"
+
+    def is_confirm_message(text: str) -> bool:
+        return str(text or "").strip() == "확정"
+
+    def build_auto_stop_message(reason: str) -> str:
+        reason_text = str(reason or "").strip()
+        if not reason_text:
+            reason_text = "중지"
+        return f"[자동 실행 중지]\n사유: {reason_text}"
+
+    def apply_actions_to_products_df(df_products: pd.DataFrame, cfg: Dict[str, Any], inputs: Dict[str, float]) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        actions, df_missing = build_actions(cfg, inputs)
+        df_work = df_products.copy() if isinstance(df_products, pd.DataFrame) else pd.DataFrame()
+        if df_work.empty:
+            return df_work, pd.DataFrame(), df_missing
+
+        def match_action(a: Dict[str, Any], name_str: str) -> bool:
+            toks = a.get("match_tokens") or []
+            return bool(toks) and all((t in name_str) for t in toks)
+
+        changes: List[Dict[str, Any]] = []
+        df_work["name"] = df_work.get("name", "").astype(str)
+        for idx, row in df_work.iterrows():
+            name_str = str(row.get("name") or "")
+            matched = [a for a in actions if match_action(a, name_str)]
+            if not matched:
+                continue
+            delta = sum(float(m.get("delta") or 0) for m in matched)
+            if abs(delta) < 1e-12:
+                continue
+            before_qty = float(row.get("stockQuantity") or 0)
+            after_qty = before_qty + delta
+            df_work.at[idx, "stockQuantity"] = after_qty
+            changes.append({
+                "상품명": name_str,
+                "기존재고": before_qty,
+                "증감": delta,
+                "최종재고": after_qty,
+                "originProductNo": int(row.get("originProductNo")),
+                "channelProductNo": row.get("channelProductNo"),
+                "매칭키워드": ", ".join([str(m.get("display") or " & ".join(m.get("match_tokens", []))) for m in matched]),
+                "원천상품": ", ".join(sorted({b for m in matched for b in m.get("bases", [])})),
+            })
+        return df_work, pd.DataFrame(changes), df_missing
 
     # ============================
     # UI
@@ -5571,7 +5587,7 @@ def render_bulk_stock_page():
 
         else:
             st.subheader("자동 실행")
-            st.caption("시작 버튼을 누르면 텔레그램으로 [현재 재고 수량]을 보내고, 첫 번째 유효한 답장 1개를 받으면 자동 반영합니다.")
+            st.caption("시작 버튼을 누르면 텔레그램으로 현재 재고와 0으로 채워진 입력 템플릿을 보내고, 답장 확인 후 확정/취소를 기다립니다.")
 
             auto_state = st.session_state.get("bulk_auto_state")
             if not isinstance(auto_state, dict):
@@ -5583,6 +5599,7 @@ def render_bulk_stock_page():
                     "reply_text": "",
                     "memo_text": "",
                     "summary_text": "",
+                    "confirm_text": "",
                     "base_update_id": 0,
                     "sent_at": 0,
                     "names": [],
@@ -5590,6 +5607,8 @@ def render_bulk_stock_page():
                     "processed_update_id": None,
                     "last_check_at": "",
                     "run_id": "",
+                    "deadline_ts": 0,
+                    "pending_inputs": {},
                 }
                 st.session_state.bulk_auto_state = auto_state
 
@@ -5602,7 +5621,12 @@ def render_bulk_stock_page():
             if stop_auto:
                 auto_state["polling"] = False
                 auto_state["status"] = "stopped"
+                auto_state["summary_text"] = build_auto_stop_message("수동 중지")
                 st.session_state.bulk_auto_state = auto_state
+                try:
+                    telegram_send_message(auto_state["summary_text"])
+                except Exception:
+                    pass
                 st.info("자동 실행을 중지했습니다.")
 
             if start_auto:
@@ -5617,30 +5641,170 @@ def render_bulk_stock_page():
                         current_names = [str(p.get("name", "")).strip() for p in cfg.get("products", []) if str(p.get("name", "")).strip()]
                         base_update_id = _get_latest_update_id()
                         message_text = build_current_stock_message(current_names, stock_map)
+                        template_text = build_input_template_message(current_names)
                         telegram_send_message(message_text)
+                        telegram_send_message(template_text)
                     except Exception as e:
                         auto_state.update({"status": "error", "polling": False, "error": str(e)})
                         st.session_state.bulk_auto_state = auto_state
                     else:
+                        now_ts = int(time.time())
                         auto_state = {
                             "status": "waiting_reply",
                             "polling": True,
                             "error": "",
                             "message_text": message_text,
+                            "template_text": template_text,
                             "reply_text": "",
                             "memo_text": "",
                             "summary_text": "",
+                            "confirm_text": "",
                             "base_update_id": int(base_update_id),
-                            "sent_at": int(time.time()),
+                            "sent_at": now_ts,
                             "names": current_names,
                             "products_records": df_products.to_dict(orient="records"),
                             "processed_update_id": None,
                             "last_check_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "run_id": now_prefix_kst(),
+                            "deadline_ts": now_ts + TELEGRAM_AUTO_TIMEOUT_SECONDS,
+                            "pending_inputs": {},
                         }
                         st.session_state.bulk_auto_state = auto_state
-                        st.success("텔레그램으로 [현재 재고 수량]을 전송했습니다. 첫 번째 유효한 답장을 기다립니다.")
+                        st.success("텔레그램으로 현재 재고/입력 템플릿을 전송했습니다. 답장을 기다립니다.")
                         st.rerun()
+
+            auto_state = st.session_state.get("bulk_auto_state") or {}
+            status = auto_state.get("status", "idle")
+            poll_active = bool(auto_state.get("polling"))
+
+            if status == "error" and auto_state.get("error"):
+                st.error(auto_state.get("error"))
+            elif status == "done":
+                st.success("자동 반영이 완료되었습니다.")
+            elif status == "stopped":
+                st.info("자동 실행이 중지되었습니다.")
+            elif status == "waiting_confirm":
+                st.info("입력값을 받았습니다. 텔레그램에서 '확정' 또는 '취소'를 기다리는 중입니다.")
+            elif poll_active:
+                st.info("텔레그램 답장을 기다리는 중입니다.")
+            else:
+                st.caption("자동 실행 시작을 누르면 텔레그램 답장을 자동 확인합니다.")
+
+            if auto_state.get("message_text"):
+                st.text(auto_state.get("message_text"))
+            if auto_state.get("reply_text"):
+                st.caption("최근 입력 답장")
+                st.text(auto_state.get("reply_text"))
+            if auto_state.get("confirm_text"):
+                st.caption("확정 대기 메시지")
+                st.text(auto_state.get("confirm_text"))
+            if auto_state.get("memo_text"):
+                st.caption("메모장 텍스트")
+                st.text(auto_state.get("memo_text"))
+            if auto_state.get("summary_text"):
+                st.caption("최종 결과")
+                st.text(auto_state.get("summary_text"))
+            if auto_state.get("last_check_at"):
+                st.caption(f"마지막 확인: {auto_state.get('last_check_at')}")
+            if auto_state.get("deadline_ts") and poll_active:
+                remain = max(0, int(auto_state.get("deadline_ts") or 0) - int(time.time()))
+                st.caption(f"남은 대기시간: {remain // 60}분 {remain % 60}초")
+
+            if poll_active and status in ("waiting_reply", "waiting_confirm"):
+                try:
+                    now_ts = int(time.time())
+                    if int(auto_state.get("deadline_ts") or 0) > 0 and now_ts > int(auto_state.get("deadline_ts") or 0):
+                        stop_text = build_auto_stop_message("20분 동안 답장이 없어 자동 실행을 중지했습니다.")
+                        auto_state["status"] = "stopped"
+                        auto_state["polling"] = False
+                        auto_state["summary_text"] = stop_text
+                        st.session_state.bulk_auto_state = auto_state
+                        telegram_send_message(stop_text)
+                        st.rerun()
+
+                    updates = telegram_get_updates(offset=int(auto_state.get("base_update_id", 0)) + 1)
+                    auto_state["last_check_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    for upd in updates:
+                        try:
+                            update_id = int(upd.get("update_id") or 0)
+                        except Exception:
+                            continue
+                        msg = upd.get("message") or upd.get("edited_message") or {}
+                        chat = msg.get("chat") or {}
+                        if str(chat.get("id") or "") != str(TELEGRAM_CHAT_ID):
+                            continue
+                        if int(msg.get("date") or 0) < int(auto_state.get("sent_at") or 0):
+                            continue
+                        text_msg = str(msg.get("text") or "").strip()
+                        if not text_msg:
+                            continue
+                        auto_state["processed_update_id"] = update_id
+                        auto_state["base_update_id"] = max(int(auto_state.get("base_update_id") or 0), update_id)
+                        auto_state["last_check_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        auto_state["deadline_ts"] = int(time.time()) + TELEGRAM_AUTO_TIMEOUT_SECONDS
+                        names = auto_state.get("names") or []
+
+                        if is_cancel_message(text_msg):
+                            stop_text = build_auto_stop_message("사용자가 '취소'를 보내 자동 실행을 중지했습니다.")
+                            auto_state["reply_text"] = text_msg
+                            auto_state["status"] = "stopped"
+                            auto_state["polling"] = False
+                            auto_state["summary_text"] = stop_text
+                            st.session_state.bulk_auto_state = auto_state
+                            telegram_send_message(stop_text)
+                            st.rerun()
+
+                        if status == "waiting_confirm" and is_confirm_message(text_msg):
+                            inputs = auto_state.get("pending_inputs") or {}
+                            auto_state["reply_text"] = text_msg
+                            memo_text = build_auto_memo_text(names, inputs)
+                            auto_state["memo_text"] = memo_text
+                            telegram_send_message(memo_text)
+                            df_products = pd.DataFrame(auto_state.get("products_records") or [])
+                            _updated_df, df_changes, df_missing = apply_actions_to_products_df(df_products, cfg, inputs)
+                            df_to_push = df_changes.copy() if isinstance(df_changes, pd.DataFrame) else pd.DataFrame()
+                            if not df_to_push.empty and "증감" in df_to_push.columns:
+                                df_to_push = df_to_push[df_to_push["증감"].astype(float) > 0].copy()
+                            api_result = push_stock_updates(df_to_push)
+                            summary_text = summarize_auto_result(api_result.get("sent", 0), df_changes, df_missing, api_result)
+                            auto_state["summary_text"] = summary_text
+                            auto_state["status"] = "done"
+                            auto_state["polling"] = False
+                            st.session_state.bulk_auto_state = auto_state
+                            telegram_send_message(summary_text)
+                            st.rerun()
+
+                        ok, parsed_reply, err_text = parse_first_reply_message(text_msg, len(names))
+                        if ok:
+                            inputs = build_auto_inputs(names, parsed_reply)
+                            confirm_text = build_confirmation_message(names, inputs)
+                            auto_state["reply_text"] = text_msg
+                            auto_state["pending_inputs"] = inputs
+                            auto_state["confirm_text"] = confirm_text
+                            auto_state["status"] = "waiting_confirm"
+                            st.session_state.bulk_auto_state = auto_state
+                            telegram_send_message(confirm_text)
+                            st.rerun()
+
+                        invalid_text = build_invalid_reply_message(names, err_text)
+                        auto_state["reply_text"] = text_msg
+                        st.session_state.bulk_auto_state = auto_state
+                        telegram_send_message(invalid_text)
+                        st.rerun()
+
+                    st.session_state.bulk_auto_state = auto_state
+                    time.sleep(TELEGRAM_AUTO_POLL_SECONDS)
+                    st.rerun()
+                except Exception as e:
+                    auto_state["status"] = "error"
+                    auto_state["polling"] = False
+                    auto_state["error"] = str(e)
+                    st.session_state.bulk_auto_state = auto_state
+                    try:
+                        telegram_send_message(build_auto_stop_message(f"오류로 자동 실행이 중지되었습니다: {e}"))
+                    except Exception:
+                        pass
+                    st.rerun()
 
             auto_state = st.session_state.get("bulk_auto_state") or {}
             status = auto_state.get("status", "idle")
@@ -5704,6 +5868,8 @@ def render_bulk_stock_page():
                         df_products = pd.DataFrame(auto_state.get("products_records") or [])
                         _updated_df, df_changes, df_missing = apply_actions_to_products_df(df_products, cfg, inputs)
                         df_to_push = df_changes.copy() if isinstance(df_changes, pd.DataFrame) else pd.DataFrame()
+                        if not df_to_push.empty:
+                            df_to_push = df_to_push[df_to_push["증감"].astype(float) > 0].copy()
                         api_result = push_stock_updates(df_to_push)
                         summary_text = summarize_auto_result(api_result.get("sent", 0), df_changes, df_missing, api_result)
                         auto_state["summary_text"] = summary_text
