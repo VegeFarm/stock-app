@@ -3873,13 +3873,28 @@ def _sales_write_result_to_month_sheet(
     last_used_row = 0
     date_rows: list[tuple[int, int, int]] = []
 
+    def _row_values_at(row_no: int) -> list[str]:
+        if 1 <= int(row_no) <= len(values):
+            return [str(v).strip() for v in (values[int(row_no) - 1] or [])]
+        return []
+
+    def _row_has_ac_content(row_no: int) -> bool:
+        row_values = _row_values_at(row_no)
+        # A:C에 실제 값이 있으면 새 날짜를 바로 덮어쓰지 않고 행 삽입 대상으로 봅니다.
+        return any(v for v in row_values[:3])
+
+    def _is_summary_row(row_values: list[str]) -> bool:
+        # 시트에서는 "합 계"처럼 글자 사이에 공백을 넣는 경우가 있어 공백 제거 후 판단합니다.
+        normalized = [re.sub(r"\s+", "", str(v or "")) for v in row_values]
+        return any(("합계" in v) or ("총합계" in v) for v in normalized)
+
     # 1) 합계 행/기존 날짜 행/마지막 사용 행 확인
     for idx, row in enumerate(values, start=1):
         row_values = [str(v).strip() for v in row]
         if any(row_values):
             last_used_row = idx
 
-        if summary_row is None and any("합계" in v for v in row_values):
+        if summary_row is None and _is_summary_row(row_values):
             summary_row = idx
 
         # 합계 행 이후는 날짜 데이터 영역으로 보지 않습니다.
@@ -3900,17 +3915,26 @@ def _sales_write_result_to_month_sheet(
         if target_md:
             for row_idx, month_num, day_num in date_rows:
                 if (month_num, day_num) > target_md:
+                    # 중간 날짜는 다음 날짜 행 바로 위에 새 행을 삽입합니다.
                     target_row = row_idx
                     insert_needed = True
                     break
 
         if target_row is None:
-            if summary_row:
-                # 가장 마지막 날짜 다음에 넣는 경우도 합계 행 바로 위에 행을 삽입합니다.
+            last_date_row = max((r for r, _m, _d in date_rows), default=None)
+            if last_date_row:
+                # 최신 날짜는 합계 바로 위가 아니라 마지막 날짜의 바로 다음 행에 넣습니다.
+                # 예: 4/24 다음 4/26을 넣으면 빈 행들이 있더라도 4/24 바로 아래 행에 기록합니다.
+                target_row = int(last_date_row) + 1
+                # 단, 그 행의 A:C에 이미 값이 있으면 덮어쓰지 않고 행 삽입합니다.
+                # 합계 행이 바로 다음 행인 경우도 합계 위에 삽입됩니다.
+                insert_needed = bool(_row_has_ac_content(target_row))
+            elif summary_row:
+                # 날짜 데이터가 아직 없고 합계 행만 있으면 합계 행 위에 삽입합니다.
                 target_row = summary_row
                 insert_needed = True
             else:
-                # 합계 행이 없으면 현재 데이터 마지막 행 아래에 작성합니다.
+                # 합계 행도 날짜 행도 없으면 현재 데이터 마지막 행 아래에 작성합니다.
                 target_row = max(last_used_row + 1, 1)
                 insert_needed = False
 
