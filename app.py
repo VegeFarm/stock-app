@@ -3830,6 +3830,7 @@ def _sales_write_result_to_month_sheet(
     - 날짜 행이 있으면 B/C를 갱신합니다.
     - 날짜 행이 없으면 날짜 순서에 맞는 위치에 행을 삽입합니다.
     - '합계' 행이 있으면 합계 행 아래가 아니라 합계 행 위에 새 날짜 행을 삽입합니다.
+    - 새 날짜 행을 만들 때 D/E열 수식은 인접 날짜 행에서 복사해 유지합니다.
     """
     spreadsheet_id = _extract_spreadsheet_id(spreadsheet_id_or_url)
     if not spreadsheet_id:
@@ -3850,8 +3851,15 @@ def _sales_write_result_to_month_sheet(
             "date_label": date_label,
         }
 
+    sheet_id = sheet_props[month_sheet].get("sheetId")
+    if sheet_id is None:
+        raise RuntimeError(f"'{month_sheet}' 시트 ID를 찾지 못했습니다.")
+
     quoted = _sales_quote_sheet_name(month_sheet)
-    read_range = f"{quoted}!A:C"
+
+    # A:C만 읽으면 '합계' 문구가 D/E열에 있는 시트에서 합계 행을 못 찾아서
+    # 새 날짜가 합계 행 아래로 들어갈 수 있습니다. A:E까지 읽어 합계 행을 안정적으로 감지합니다.
+    read_range = f"{quoted}!A:E"
     resp = sheets_service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=read_range,
@@ -3898,11 +3906,11 @@ def _sales_write_result_to_month_sheet(
 
         if target_row is None:
             if summary_row:
-                # 합계 행이 있으면 합계 아래가 아니라 합계 바로 위에 삽입
+                # 가장 마지막 날짜 다음에 넣는 경우도 합계 행 바로 위에 행을 삽입합니다.
                 target_row = summary_row
                 insert_needed = True
             else:
-                # 합계 행이 없으면 현재 데이터 마지막 행 아래에 작성
+                # 합계 행이 없으면 현재 데이터 마지막 행 아래에 작성합니다.
                 target_row = max(last_used_row + 1, 1)
                 insert_needed = False
 
@@ -3910,12 +3918,20 @@ def _sales_write_result_to_month_sheet(
     else:
         action = "updated"
 
+    # 새 날짜 행의 D/E 수식을 복사할 기준 행을 정합니다.
+    # 우선 이전 날짜 행을 사용하고, 이전 날짜가 없으면 다음 날짜 행을 사용합니다.
+    formula_source_row = None
+    if action == "created":
+        previous_date_rows = [r for r, _m, _d in date_rows if r < target_row]
+        next_date_rows = [r for r, _m, _d in date_rows if r >= target_row]
+        if previous_date_rows:
+            formula_source_row = max(previous_date_rows)
+        elif next_date_rows:
+            # 행 삽입 후에는 기존 target_row 위치의 날짜 행이 한 줄 아래로 밀립니다.
+            formula_source_row = min(next_date_rows) + (1 if insert_needed else 0)
+
     # 3) 날짜 순서 중간/합계 행 위에 넣어야 하면 실제 행 삽입
     if insert_needed:
-        sheet_id = sheet_props[month_sheet].get("sheetId")
-        if sheet_id is None:
-            raise RuntimeError(f"'{month_sheet}' 시트 ID를 찾지 못해 행 삽입을 진행할 수 없습니다.")
-
         insert_req = {
             "insertDimension": {
                 "range": {
@@ -3931,6 +3947,58 @@ def _sales_write_result_to_month_sheet(
             spreadsheetId=spreadsheet_id,
             body={"requests": [insert_req]},
         ).execute()
+
+    # 4) 새 날짜 행이면 D/E열 수식과 서식을 인접 날짜 행에서 복사합니다.
+    # Google Sheets의 copyPaste는 상대참조 수식을 새 행 번호에 맞게 조정해 줍니다.
+    formula_copied = False
+    if action == "created" and formula_source_row and formula_source_row != target_row:
+        copy_requests = [
+            {
+                "copyPaste": {
+                    "source": {
+                        "sheetId": int(sheet_id),
+                        "startRowIndex": int(formula_source_row) - 1,
+                        "endRowIndex": int(formula_source_row),
+                        "startColumnIndex": 3,  # D열
+                        "endColumnIndex": 5,    # E열까지
+                    },
+                    "destination": {
+                        "sheetId": int(sheet_id),
+                        "startRowIndex": int(target_row) - 1,
+                        "endRowIndex": int(target_row),
+                        "startColumnIndex": 3,
+                        "endColumnIndex": 5,
+                    },
+                    "pasteType": "PASTE_FORMULA",
+                    "pasteOrientation": "NORMAL",
+                }
+            },
+            {
+                "copyPaste": {
+                    "source": {
+                        "sheetId": int(sheet_id),
+                        "startRowIndex": int(formula_source_row) - 1,
+                        "endRowIndex": int(formula_source_row),
+                        "startColumnIndex": 3,
+                        "endColumnIndex": 5,
+                    },
+                    "destination": {
+                        "sheetId": int(sheet_id),
+                        "startRowIndex": int(target_row) - 1,
+                        "endRowIndex": int(target_row),
+                        "startColumnIndex": 3,
+                        "endColumnIndex": 5,
+                    },
+                    "pasteType": "PASTE_FORMAT",
+                    "pasteOrientation": "NORMAL",
+                }
+            },
+        ]
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": copy_requests},
+        ).execute()
+        formula_copied = True
 
     write_range = f"{quoted}!A{target_row}:C{target_row}"
     row_values = [[date_label, int(round(float(total_amount or 0))), int(round(float(shipping_calc or 0)))]]
@@ -3948,16 +4016,19 @@ def _sales_write_result_to_month_sheet(
     else:
         action_text = "새 날짜 행 생성"
 
+    formula_text = " / D:E 수식 복사 완료" if formula_copied else ""
+
     return {
         "status": "written",
-        "message": f"'{month_sheet}' 시트 {target_row}행에 {date_label} 기준 결과를 기록했습니다. ({action_text})",
+        "message": f"'{month_sheet}' 시트 {target_row}행에 {date_label} 기준 결과를 기록했습니다. ({action_text}{formula_text})",
         "month_sheet": month_sheet,
         "date_label": date_label,
         "row": target_row,
         "action": action,
         "inserted": insert_needed,
+        "formula_copied": formula_copied,
+        "formula_source_row": formula_source_row,
     }
-
 
 def _sales_list_drive_excels_for_date(target_date) -> tuple[str, list[dict]]:
     """판매내역/연도/날짜폴더 안의 xlsx 파일 목록을 전부 반환합니다."""
