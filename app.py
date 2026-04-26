@@ -21,11 +21,12 @@ import requests
 try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build as google_build
-    from googleapiclient.http import MediaIoBaseUpload
+    from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 except Exception:
     service_account = None
     google_build = None
     MediaIoBaseUpload = None
+    MediaIoBaseDownload = None
 
 # -------------------- Optional deps --------------------
 # Excel decrypt (SmartStore password 0000)
@@ -177,6 +178,11 @@ GOOGLE_DRIVE_SALES_ROOT_FOLDER_NAME = (os.environ.get("GOOGLE_DRIVE_SALES_ROOT_F
 GOOGLE_DRIVE_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 GOOGLE_DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 
+# 매출계산 결과를 기록할 Google Sheet ID/URL (선택)
+# - 예: https://docs.google.com/spreadsheets/d/시트ID/edit
+# - 해당 월 시트(예: 4월)가 없으면 기록하지 않고 계산 결과만 보여줍니다.
+SALES_RESULT_SPREADSHEET_ID = (os.environ.get("SALES_RESULT_SPREADSHEET_ID") or "").strip()
+
 
 def _drive_date_folder_name(dt: Optional[datetime] = None) -> str:
     dt = dt or datetime.now(KST_TZ)
@@ -217,6 +223,29 @@ def _get_google_drive_service():
     return google_build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+@st.cache_resource(show_spinner=False)
+def _get_google_sheets_service():
+    if service_account is None or google_build is None:
+        raise RuntimeError("Google Sheets 라이브러리가 설치되지 않았습니다. requirements.txt를 확인해 주세요.")
+    info = _load_service_account_info()
+    creds = service_account.Credentials.from_service_account_info(
+        info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return google_build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def _extract_spreadsheet_id(value: str) -> str:
+    """Google Sheet URL 또는 ID에서 spreadsheet_id만 추출합니다."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", raw)
+    if m:
+        return m.group(1)
+    return raw.split("?", 1)[0].split("#", 1)[0].strip()
+
+
 def _drive_list_files(service, query: str, page_size: int = 20) -> list[dict]:
     resp = service.files().list(
         q=query,
@@ -228,6 +257,45 @@ def _drive_list_files(service, query: str, page_size: int = 20) -> list[dict]:
         includeItemsFromAllDrives=True,
     ).execute()
     return resp.get("files", []) or []
+
+
+def _drive_list_files_all(service, query: str, page_size: int = 100) -> list[dict]:
+    """Google Drive 검색 결과를 페이지 끝까지 모두 가져옵니다."""
+    out: list[dict] = []
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=query,
+            spaces="drive",
+            fields="nextPageToken,files(id,name,mimeType,modifiedTime,parents,size)",
+            pageSize=page_size,
+            orderBy="name",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageToken=page_token,
+        ).execute()
+        out.extend(resp.get("files", []) or [])
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return out
+
+
+def _drive_download_file_bytes(service, file_id: str) -> bytes:
+    if MediaIoBaseDownload is None:
+        raise RuntimeError("Google Drive 다운로드 라이브러리가 설치되지 않았습니다. requirements.txt를 확인해 주세요.")
+
+    try:
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+    except TypeError:
+        request = service.files().get_media(fileId=file_id)
+
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return fh.getvalue()
 
 
 def _drive_find_folder_by_name(service, folder_name: str, parent_id: Optional[str] = None) -> Optional[str]:
@@ -3646,6 +3714,245 @@ def _sales_compute_from_sheets(sheets: Dict[str, pd.DataFrame]) -> Tuple[float, 
     return total_amount, nonzero_people_keys
 
 
+def _sales_compute_from_file_bytes(file_bytes: bytes) -> tuple[float, set]:
+    """기존 매출계산 로직을 파일 바이트 기준으로 재사용합니다."""
+    sheets = _sales_read_excel_sheets(file_bytes)
+    return _sales_compute_from_sheets(sheets)
+
+
+def _sales_drive_date_folder_name(dt_obj) -> str:
+    return f"{dt_obj.month}.{dt_obj.day}"
+
+
+def _sales_result_month_sheet_name(dt_obj) -> str:
+    return f"{dt_obj.month}월"
+
+
+def _sales_result_date_label(dt_obj) -> str:
+    return f"{dt_obj.month}/{dt_obj.day}"
+
+
+def _sales_quote_sheet_name(sheet_name: str) -> str:
+    return "'" + str(sheet_name).replace("'", "''") + "'"
+
+
+def _sales_norm_date_label(value: str) -> str:
+    """시트 A열 날짜값을 M/D 형태로 최대한 맞춰 비교합니다."""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+
+    s2 = re.sub(r"\s+", "", s)
+    s2 = s2.replace("년", "/").replace("월", "/").replace("일", "")
+    s2 = s2.replace(".", "/").replace("-", "/")
+
+    # 2026/4/25, 26/4/25 같은 연도 포함 형식이면 뒤의 월/일만 사용
+    nums = re.findall(r"\d+", s2)
+    if len(nums) >= 3:
+        return f"{int(nums[-2])}/{int(nums[-1])}"
+    if len(nums) >= 2:
+        return f"{int(nums[0])}/{int(nums[1])}"
+
+    return s2
+
+
+def _sales_get_spreadsheet_sheet_titles(sheets_service, spreadsheet_id: str) -> list[str]:
+    meta = sheets_service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets.properties.title",
+    ).execute()
+    return [s["properties"]["title"] for s in (meta.get("sheets", []) or [])]
+
+
+def _sales_write_result_to_month_sheet(
+    spreadsheet_id_or_url: str,
+    target_date,
+    total_amount: float,
+    shipping_calc: float,
+) -> dict:
+    """
+    지정 구글시트의 해당월 시트에 A=날짜, B=총 주문금액, C=인원×3,500 결과를 기록합니다.
+    - 해당월 시트가 없으면 생성하지 않고 skipped 처리합니다.
+    - 날짜 행이 있으면 B/C를 갱신하고, 없으면 마지막 행 아래에 새로 추가합니다.
+    """
+    spreadsheet_id = _extract_spreadsheet_id(spreadsheet_id_or_url)
+    if not spreadsheet_id:
+        return {"status": "skipped", "message": "결과 기록용 Google Sheet ID/URL이 비어 있어 시트 기록은 건너뛰었습니다."}
+
+    sheets_service = _get_google_sheets_service()
+    month_sheet = _sales_result_month_sheet_name(target_date)
+    date_label = _sales_result_date_label(target_date)
+    target_key = _sales_norm_date_label(date_label)
+
+    titles = _sales_get_spreadsheet_sheet_titles(sheets_service, spreadsheet_id)
+    if month_sheet not in titles:
+        return {
+            "status": "skipped",
+            "message": f"'{month_sheet}' 시트가 없어 Google Sheet 기록은 건너뛰었습니다.",
+            "month_sheet": month_sheet,
+            "date_label": date_label,
+        }
+
+    quoted = _sales_quote_sheet_name(month_sheet)
+    read_range = f"{quoted}!A:C"
+    resp = sheets_service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=read_range,
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute()
+    values = resp.get("values", []) or []
+
+    target_row = None
+    last_used_row = 0
+    for idx, row in enumerate(values, start=1):
+        if any(str(v).strip() for v in row):
+            last_used_row = idx
+        a_val = row[0] if row else ""
+        if _sales_norm_date_label(a_val) == target_key:
+            target_row = idx
+            break
+
+    if target_row is None:
+        target_row = max(last_used_row + 1, 1)
+        action = "created"
+    else:
+        action = "updated"
+
+    write_range = f"{quoted}!A{target_row}:C{target_row}"
+    row_values = [[date_label, int(round(float(total_amount or 0))), int(round(float(shipping_calc or 0)))]]
+    sheets_service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=write_range,
+        valueInputOption="USER_ENTERED",
+        body={"values": row_values},
+    ).execute()
+
+    action_text = "새 날짜 행 생성" if action == "created" else "기존 날짜 행 갱신"
+    return {
+        "status": "written",
+        "message": f"'{month_sheet}' 시트 {target_row}행에 {date_label} 기준 결과를 기록했습니다. ({action_text})",
+        "month_sheet": month_sheet,
+        "date_label": date_label,
+        "row": target_row,
+        "action": action,
+    }
+
+
+def _sales_list_drive_excels_for_date(target_date) -> tuple[str, list[dict]]:
+    """판매내역/날짜폴더 안의 xlsx 파일 목록을 전부 반환합니다."""
+    service = _get_google_drive_service()
+    root_id = _drive_get_or_create_sales_root_folder(service)
+    date_folder_name = _sales_drive_date_folder_name(target_date)
+    date_folder_id = _drive_find_folder_by_name(service, date_folder_name, parent_id=root_id)
+    if not date_folder_id:
+        return date_folder_name, []
+
+    q = (
+        f"trashed=false and '{date_folder_id}' in parents and "
+        f"(mimeType='{GOOGLE_DRIVE_XLSX_MIME}' or name contains '.xlsx')"
+    )
+    files = _drive_list_files_all(service, q, page_size=100)
+    # 임시/숨김 파일 제외
+    files = [f for f in files if str(f.get("name", "")).lower().endswith(".xlsx") and not str(f.get("name", "")).startswith("~$")]
+    return date_folder_name, files
+
+
+def _sales_calc_from_drive_date_folder(target_date, spreadsheet_id_or_url: str = "") -> dict:
+    """
+    Google Drive 날짜 폴더의 엑셀을 전부 계산하고, 선택적으로 지정 Google Sheet에 기록합니다.
+    """
+    drive_service = _get_google_drive_service()
+    root_id = _drive_get_or_create_sales_root_folder(drive_service)
+    date_folder_name = _sales_drive_date_folder_name(target_date)
+    date_folder_id = _drive_find_folder_by_name(drive_service, date_folder_name, parent_id=root_id)
+
+    if not date_folder_id:
+        return {
+            "ok": False,
+            "date_folder_name": date_folder_name,
+            "files": [],
+            "summary_df": pd.DataFrame(),
+            "grand_amount": 0.0,
+            "grand_unique_count_sum": 0,
+            "grand_shipping_calc": 0,
+            "sheet_write": {"status": "skipped", "message": "날짜 폴더가 없어 계산/기록을 진행하지 않았습니다."},
+            "message": f"Google Drive에서 '{GOOGLE_DRIVE_SALES_ROOT_FOLDER_NAME}/{date_folder_name}' 폴더를 찾지 못했습니다.",
+        }
+
+    q = (
+        f"trashed=false and '{date_folder_id}' in parents and "
+        f"(mimeType='{GOOGLE_DRIVE_XLSX_MIME}' or name contains '.xlsx')"
+    )
+    drive_files = _drive_list_files_all(drive_service, q, page_size=100)
+    drive_files = [
+        f for f in drive_files
+        if str(f.get("name", "")).lower().endswith(".xlsx") and not str(f.get("name", "")).startswith("~$")
+    ]
+
+    if not drive_files:
+        return {
+            "ok": False,
+            "date_folder_name": date_folder_name,
+            "files": [],
+            "summary_df": pd.DataFrame(),
+            "grand_amount": 0.0,
+            "grand_unique_count_sum": 0,
+            "grand_shipping_calc": 0,
+            "sheet_write": {"status": "skipped", "message": "날짜 폴더 안에 xlsx 파일이 없어 시트 기록은 건너뛰었습니다."},
+            "message": f"'{GOOGLE_DRIVE_SALES_ROOT_FOLDER_NAME}/{date_folder_name}' 폴더 안에 .xlsx 파일이 없습니다.",
+        }
+
+    per_file_rows = []
+    grand_amount = 0.0
+    grand_unique_count_sum = 0
+
+    for f in drive_files:
+        try:
+            file_bytes = _drive_download_file_bytes(drive_service, f["id"])
+            amount_sum, keyset = _sales_compute_from_file_bytes(file_bytes)
+            unique_count = len(keyset)
+            shipping_calc = unique_count * 3500
+
+            per_file_rows.append({
+                "파일명": f.get("name", ""),
+                "최종 상품별 총 주문금액 합계": amount_sum,
+                "배송비≠0 (중복제거 인원수)": unique_count,
+                "인원×3,500 합계": shipping_calc,
+            })
+            grand_amount += amount_sum
+            grand_unique_count_sum += unique_count
+        except Exception as e:
+            per_file_rows.append({
+                "파일명": f.get("name", ""),
+                "최종 상품별 총 주문금액 합계": None,
+                "배송비≠0 (중복제거 인원수)": None,
+                "인원×3,500 합계": None,
+                "오류": str(e),
+            })
+
+    grand_shipping_calc = grand_unique_count_sum * 3500
+    summary_df = pd.DataFrame(per_file_rows)
+
+    sheet_write = _sales_write_result_to_month_sheet(
+        spreadsheet_id_or_url=spreadsheet_id_or_url,
+        target_date=target_date,
+        total_amount=grand_amount,
+        shipping_calc=grand_shipping_calc,
+    )
+
+    return {
+        "ok": True,
+        "date_folder_name": date_folder_name,
+        "files": drive_files,
+        "summary_df": summary_df,
+        "grand_amount": grand_amount,
+        "grand_unique_count_sum": grand_unique_count_sum,
+        "grand_shipping_calc": grand_shipping_calc,
+        "sheet_write": sheet_write,
+        "message": f"'{GOOGLE_DRIVE_SALES_ROOT_FOLDER_NAME}/{date_folder_name}' 폴더의 xlsx {len(drive_files)}개를 계산했습니다.",
+    }
+
+
 def _sales_fmt_commas(x) -> str:
     if x is None:
         return ""
@@ -3791,6 +4098,69 @@ def render_sales_calc_page():
                 "grand_unique_count_sum": grand_unique_count_sum,
                 "grand_shipping_calc": grand_shipping_calc,
             }
+
+    st.divider()
+    st.subheader("📁 Google Drive 날짜 폴더에서 자동 계산")
+    st.caption(
+        f"날짜를 따로 바꾸지 않으면 오늘 날짜 기준으로 "
+        f"'{GOOGLE_DRIVE_SALES_ROOT_FOLDER_NAME}/월.일' 폴더 안의 엑셀을 전부 가져와 계산합니다. "
+        "결과는 지정 Google Sheet의 해당월 시트에 A=날짜, B=총 주문금액, C=인원×3,500원으로 기록합니다."
+    )
+
+    drive_col1, drive_col2 = st.columns([1, 2])
+    with drive_col1:
+        sales_drive_date = st.date_input(
+            "불러올 날짜",
+            value=datetime.now(KST_TZ).date(),
+            key="sales_drive_date",
+        )
+    with drive_col2:
+        sales_result_sheet_input = st.text_input(
+            "결과 기록 Google Sheet ID 또는 URL",
+            value=SALES_RESULT_SPREADSHEET_ID,
+            placeholder="https://docs.google.com/spreadsheets/d/시트ID/edit 또는 시트ID",
+            key="sales_result_spreadsheet_input",
+        )
+
+    drive_btn_col, _ = st.columns([1.6, 1])
+    with drive_btn_col:
+        drive_calc_btn = st.button(
+            "📁 Drive 폴더 엑셀 전체 계산 + 시트 기록",
+            use_container_width=True,
+            key="sales_drive_calc_btn",
+        )
+
+    if drive_calc_btn:
+        if not (sales_result_sheet_input or "").strip():
+            st.warning("결과를 넣을 Google Sheet ID 또는 URL을 입력해 주세요. Render 환경변수 SALES_RESULT_SPREADSHEET_ID로 고정해도 됩니다.")
+        else:
+            with st.spinner("Google Drive 날짜 폴더의 엑셀을 불러와 계산 중입니다..."):
+                try:
+                    drive_res = _sales_calc_from_drive_date_folder(
+                        target_date=sales_drive_date,
+                        spreadsheet_id_or_url=sales_result_sheet_input,
+                    )
+                    st.session_state["sales_result"] = {
+                        "summary_df": drive_res["summary_df"],
+                        "grand_amount": drive_res["grand_amount"],
+                        "grand_unique_count_sum": drive_res["grand_unique_count_sum"],
+                        "grand_shipping_calc": drive_res["grand_shipping_calc"],
+                    }
+                    st.session_state["sales_drive_last_message"] = drive_res.get("message", "")
+                    st.session_state["sales_drive_last_sheet_write"] = drive_res.get("sheet_write", {})
+
+                    if drive_res.get("ok"):
+                        st.success(drive_res.get("message", "계산 완료"))
+                    else:
+                        st.warning(drive_res.get("message", "계산할 파일이 없습니다."))
+
+                    sheet_write = drive_res.get("sheet_write", {}) or {}
+                    if sheet_write.get("status") == "written":
+                        st.success(sheet_write.get("message", "Google Sheet 기록 완료"))
+                    elif sheet_write.get("message"):
+                        st.info(sheet_write.get("message"))
+                except Exception as e:
+                    st.error(f"Drive 자동 계산/시트 기록 실패: {e}")
 
     if "sales_result" in st.session_state:
         res = st.session_state["sales_result"]
