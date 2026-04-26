@@ -3764,6 +3764,36 @@ def _sales_result_date_label(dt_obj) -> str:
     return f"{dt_obj.month}/{dt_obj.day}"
 
 
+def _sales_result_range_label_if_gap(target_date, previous_md: Optional[tuple[int, int]]) -> str:
+    """
+    매출기록시트에 새 최신 날짜를 추가할 때, 직전 기록일과 목표일 사이에
+    빈 날짜가 있으면 A열 날짜를 범위로 표시합니다.
+    예: 직전 4/24 + 목표 4/26 → 4/25~4/26
+        직전 4/10 + 목표 4/26 → 4/11~4/26
+        직전 4/25 + 목표 4/26 → 4/26
+    """
+    default_label = _sales_result_date_label(target_date)
+    if not previous_md:
+        return default_label
+
+    try:
+        target_dt = datetime(int(target_date.year), int(target_date.month), int(target_date.day))
+        prev_dt = datetime(int(target_date.year), int(previous_md[0]), int(previous_md[1]))
+    except Exception:
+        return default_label
+
+    # 해당 월 시트 안에서만 범위 표기를 적용합니다.
+    if prev_dt.month != target_dt.month or prev_dt >= target_dt:
+        return default_label
+
+    # 직전 기록일 바로 다음날이면 범위가 아니라 목표 날짜만 씁니다.
+    if (target_dt - prev_dt).days <= 1:
+        return default_label
+
+    start_dt = prev_dt + timedelta(days=1)
+    return f"{start_dt.month}/{start_dt.day}~{target_dt.month}/{target_dt.day}"
+
+
 def _sales_quote_sheet_name(sheet_name: str) -> str:
     return "'" + str(sheet_name).replace("'", "''") + "'"
 
@@ -3829,6 +3859,8 @@ def _sales_write_result_to_month_sheet(
     - 해당월 시트가 없으면 생성하지 않고 skipped 처리합니다.
     - 날짜 행이 있으면 B/C를 갱신합니다.
     - 날짜 행이 없으면 날짜 순서에 맞는 위치에 행을 삽입합니다.
+    - 최신 날짜를 추가할 때 직전 기록일과 목표일 사이에 빈 날짜가 있으면 A열을 범위로 기록합니다.
+      예: 직전 4/24 + 목표 4/26 → 4/25~4/26
     - '합계' 행이 있으면 합계 행 아래가 아니라 합계 행 위에 새 날짜 행을 삽입합니다.
     - 새 날짜 행을 만들 때 D/E열 수식은 인접 날짜 행에서 복사해 유지합니다.
     """
@@ -3839,6 +3871,10 @@ def _sales_write_result_to_month_sheet(
     sheets_service = _get_google_sheets_service()
     month_sheet = _sales_result_month_sheet_name(target_date)
     date_label = _sales_result_date_label(target_date)
+    write_date_label = date_label
+    range_label_applied = False
+    existing_date_label = ""
+    previous_md_for_range: Optional[tuple[int, int]] = None
     target_md = _sales_parse_month_day(date_label)
     target_key = _sales_norm_date_label(date_label)
 
@@ -3908,6 +3944,7 @@ def _sales_write_result_to_month_sheet(
 
         if _sales_norm_date_label(a_val) == target_key:
             target_row = idx
+            existing_date_label = str(a_val or "").strip()
             break
 
     # 2) 기존 날짜가 없으면 날짜 순서 위치 찾기
@@ -3921,8 +3958,10 @@ def _sales_write_result_to_month_sheet(
                     break
 
         if target_row is None:
-            last_date_row = max((r for r, _m, _d in date_rows), default=None)
-            if last_date_row:
+            last_date_info = max(date_rows, key=lambda x: x[0], default=None)
+            if last_date_info:
+                last_date_row, last_m, last_d = last_date_info
+                previous_md_for_range = (int(last_m), int(last_d))
                 # 최신 날짜는 합계 바로 위가 아니라 마지막 날짜의 바로 다음 행에 넣습니다.
                 # 예: 4/24 다음 4/26을 넣으면 빈 행들이 있더라도 4/24 바로 아래 행에 기록합니다.
                 target_row = int(last_date_row) + 1
@@ -3941,6 +3980,13 @@ def _sales_write_result_to_month_sheet(
         action = "created"
     else:
         action = "updated"
+        # 기존 행이 4/25~4/26 같은 범위 날짜로 되어 있으면, 갱신할 때 A열 표기를 유지합니다.
+        if existing_date_label:
+            write_date_label = existing_date_label
+
+    if action == "created" and previous_md_for_range:
+        write_date_label = _sales_result_range_label_if_gap(target_date, previous_md_for_range)
+        range_label_applied = (write_date_label != date_label)
 
     # 새 날짜 행의 D/E 수식을 복사할 기준 행을 정합니다.
     # 우선 이전 날짜 행을 사용하고, 이전 날짜가 없으면 다음 날짜 행을 사용합니다.
@@ -4025,7 +4071,7 @@ def _sales_write_result_to_month_sheet(
         formula_copied = True
 
     write_range = f"{quoted}!A{target_row}:C{target_row}"
-    row_values = [[date_label, int(round(float(total_amount or 0))), int(round(float(shipping_calc or 0)))]]
+    row_values = [[write_date_label, int(round(float(total_amount or 0))), int(round(float(shipping_calc or 0)))]]
     sheets_service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
         range=write_range,
@@ -4041,15 +4087,18 @@ def _sales_write_result_to_month_sheet(
         action_text = "새 날짜 행 생성"
 
     formula_text = " / D:E 수식 복사 완료" if formula_copied else ""
+    range_text = " / 누락 기간 날짜범위 표기" if range_label_applied else ""
 
     return {
         "status": "written",
-        "message": f"'{month_sheet}' 시트 {target_row}행에 {date_label} 기준 결과를 기록했습니다. ({action_text}{formula_text})",
+        "message": f"'{month_sheet}' 시트 {target_row}행에 {write_date_label} 기준 결과를 기록했습니다. ({action_text}{range_text}{formula_text})",
         "month_sheet": month_sheet,
-        "date_label": date_label,
+        "date_label": write_date_label,
+        "target_date_label": date_label,
         "row": target_row,
         "action": action,
         "inserted": insert_needed,
+        "range_label_applied": range_label_applied,
         "formula_copied": formula_copied,
         "formula_source_row": formula_source_row,
     }
