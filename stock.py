@@ -1,6 +1,6 @@
 from typing import Optional
 import requests
-from config import APP_DATA_DIR
+from config import APP_DATA_DIR, now_prefix_kst
 
 def fmt_qty_no_zero(x):
     try:
