@@ -407,9 +407,24 @@ def _sales_write_result_to_month_sheet(
                 # 합계 행이 바로 다음 행인 경우도 합계 위에 삽입됩니다.
                 insert_needed = bool(_row_has_ac_content(target_row))
             elif summary_row:
-                # 날짜 데이터가 아직 없고 합계 행만 있으면 합계 행 위에 삽입합니다.
-                target_row = summary_row
-                insert_needed = True
+                # 날짜 데이터가 아직 없고 합계 행만 있는 새 월/템플릿 시트에서는
+                # 합계 행 위에 바로 행을 삽입하지 않습니다.
+                # 먼저 입력 영역(기본 4행~합계행 바로 위)의 비어 있는 첫 행을 사용합니다.
+                # 예: 템플릿이 4~34행 빈칸, 35행 합계라면 첫 자동 기록은 4행에 작성되고,
+                #     4~34행이 모두 찼을 때만 35행 합계 위에 새 행을 삽입합니다.
+                first_data_row = 4
+                blank_row = None
+                for row_no in range(first_data_row, int(summary_row)):
+                    if not _row_has_ac_content(row_no):
+                        blank_row = row_no
+                        break
+
+                if blank_row is not None:
+                    target_row = blank_row
+                    insert_needed = False
+                else:
+                    target_row = summary_row
+                    insert_needed = True
             else:
                 # 합계 행도 날짜 행도 없으면 현재 데이터 마지막 행 아래에 작성합니다.
                 target_row = max(last_used_row + 1, 1)
