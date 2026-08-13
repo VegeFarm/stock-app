@@ -1685,6 +1685,7 @@ def build_tc_excel_bytes(template_bytes: bytes, rows: List[Dict[str, str]]) -> b
     c_orderer = col_of(["주문자이름", "주문자 이름", "주문자", "주문자*"], required=True)
     c_receiver = col_of(["수령자이름", "수령자 이름", "수령자", "수령자*", "수취인명"], required=True)
     c_phone = col_of(["수령자 연락처", "수령자연락처", "수취인연락처", "수취인 연락처", "수령자 연락처*"], required=True)
+    c_alimtalk = col_of(["알림톡 즉시발송", "알림톡즉시발송"], required=False)
     c_prod = col_of(["상품명", "상품명*"], required=True)
 
     c_addr_base = col_of(["도로명 기본주소", "도로명기본주소", "수령자도로명주소", "수령자 도로명 주소", "수령자 도로명 주소*"], required=False)
@@ -1728,6 +1729,7 @@ def build_tc_excel_bytes(template_bytes: bytes, rows: List[Dict[str, str]]) -> b
         put(rr, c_orderer, _limit_tc_name_20(r.get("주문자", "")))
         put(rr, c_receiver, _limit_tc_name_20(r.get("수령자", "")))
         put(rr, c_phone, r.get("수령자연락처", ""))
+        put(rr, c_alimtalk, "Y")
         put(rr, c_addr_base, full_addr or base_addr)
         put(rr, c_addr_detail, "")
         put(rr, c_receive_place, TC_RECEIVE_PLACE_FIXED)
