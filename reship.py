@@ -514,8 +514,8 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
     - 첫 줄: 이름 - 상품...
     - 다음 줄: 상품 시작 위치에 맞춰 들여쓰기
     - 수취인 사이: 빈 줄 1줄
-    - 송장수량이 2 이상이면 이름 왼쪽 위에 작은 위첨자 숫자 표시
-      (상품 문구는 한 번만 표시)
+    - 송장수량이 2 이상이면 이름 왼쪽 위에 큰 위첨자 수량 숫자만 표시
+      (상품 문구는 한 번만 표시하며 '(수량 N개)' 같은 보조 문구는 넣지 않음)
     """
     doc = Document()
     section = doc.sections[0]
@@ -552,7 +552,7 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
             shipment_count = 1
 
         prefix = f"{name} - " if name else ""
-        # 송장수량이 2 이상이면 이름 왼쪽 위에 작은 숫자를 표시합니다.
+        # 송장수량이 2 이상이면 이름 왼쪽 위에 수량 숫자만 표시합니다.
         # 둘째 줄의 상품 시작 위치는 이 숫자까지 포함한 첫 줄의 상품 시작점에 맞춥니다.
         count_prefix = f"{shipment_count} " if shipment_count > 1 else ""
         indent_basis = count_prefix + prefix
@@ -571,7 +571,8 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
 
         if shipment_count > 1:
             count_run = p.add_run(str(shipment_count))
-            _set_run_font(count_run, font_size=8)
+            _set_run_font(count_run, font_size=11)
+            count_run.font.bold = True
             count_run.font.superscript = True
             spacer_run = p.add_run(" ")
             _set_run_font(spacer_run)

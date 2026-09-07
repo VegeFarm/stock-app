@@ -2962,7 +2962,8 @@ def render_reship_page():
 
     mapping_rules = load_mapping_rules()
     text_columns = ["수취인", "연락처", "주소", "배송메모", "상품목록"]
-    columns = text_columns + ["송장수량"]
+    # 분석 결과 표에서 송장수량을 수취인명 바로 왼쪽(첫 번째 열)에 표시합니다.
+    columns = ["송장수량"] + text_columns
 
     def _normalize_count(value) -> int:
         try:
@@ -3065,8 +3066,9 @@ def render_reship_page():
             editor_ver = int(st.session_state.get("reship_editor_version", 0))
 
             # 앞전의 분석 결과 표 형태를 그대로 유지하되, 셀만 직접 수정할 수 있게 합니다.
+            # 송장수량도 같은 표의 가장 왼쪽 열에서 수정합니다.
             # 여기서 편집한 값은 초안일 뿐이며 아래 '수정' 버튼을 눌러야 확정 데이터가 바뀝니다.
-            editor_source = committed_df[text_columns].copy()
+            editor_source = committed_df[columns].copy()
             edited_table = st.data_editor(
                 editor_source,
                 num_rows="fixed",
@@ -3074,6 +3076,14 @@ def render_reship_page():
                 use_container_width=True,
                 key=f"reship_table_editor_{editor_ver}",
                 column_config={
+                    "송장수량": st.column_config.NumberColumn(
+                        "송장수량",
+                        min_value=1,
+                        step=1,
+                        format="%d",
+                        width="small",
+                        help="엑셀에 생성할 동일 송장 행 수입니다. 2 이상이면 Word에는 이름 왼쪽 위에 수량 숫자만 표시됩니다.",
+                    ),
                     "수취인": st.column_config.TextColumn("수취인명", width="small"),
                     "연락처": st.column_config.TextColumn("연락처", width="medium"),
                     "주소": st.column_config.TextColumn("주소", width="large"),
@@ -3082,51 +3092,15 @@ def render_reship_page():
                 },
             )
 
-            # 송장수량은 고객/상품 행을 화면에 복제하지 않고 숫자만 조절합니다.
-            # 수량 2 이상은 엑셀에서만 동일 행을 반복하고 Word에는 이름 왼쪽 위 작은 숫자로 표시합니다.
-            qty_values = []
-            st.markdown("**송장수량**")
-            for idx, row in committed_df.iterrows():
-                qty_key = f"reship_draft_{editor_ver}_{idx}_qty"
-                if qty_key not in st.session_state:
-                    st.session_state[qty_key] = _normalize_count(row.get("송장수량", 1))
-
-                if len(committed_df) > 1:
-                    qname, qminus, qvalue, qplus = st.columns([2.8, 0.6, 0.7, 0.6])
-                    with qname:
-                        display_name = str(edited_table.iloc[idx].get("수취인", "") or "").strip()
-                        st.caption(f"{idx + 1}. {display_name or '재배송 건'}")
-                else:
-                    qminus, qvalue, qplus, _qspace = st.columns([0.7, 0.8, 0.7, 4.2])
-
-                with qminus:
-                    if st.button("−", key=f"{qty_key}_minus", use_container_width=True):
-                        st.session_state[qty_key] = max(
-                            1,
-                            _normalize_count(st.session_state.get(qty_key, 1)) - 1,
-                        )
-                        st.rerun()
-                with qvalue:
-                    st.markdown(
-                        f"<div style='text-align:center; font-size:1.05rem; padding-top:0.35rem;'><b>{_normalize_count(st.session_state.get(qty_key, 1))}</b></div>",
-                        unsafe_allow_html=True,
-                    )
-                with qplus:
-                    if st.button("+", key=f"{qty_key}_plus", use_container_width=True):
-                        st.session_state[qty_key] = _normalize_count(st.session_state.get(qty_key, 1)) + 1
-                        st.rerun()
-
-                qty_values.append(_normalize_count(st.session_state.get(qty_key, 1)))
-
             draft_rows = []
-            for idx, row in edited_table.reset_index(drop=True).iterrows():
+            for _, row in edited_table.reset_index(drop=True).iterrows():
                 draft_rows.append({
+                    "송장수량": _normalize_count(row.get("송장수량", 1)),
                     "수취인": str(row.get("수취인", "") or "").strip(),
                     "연락처": str(row.get("연락처", "") or "").strip(),
                     "주소": str(row.get("주소", "") or "").strip(),
                     "배송메모": str(row.get("배송메모", "") or "").strip(),
                     "상품목록": str(row.get("상품목록", "") or "").strip(),
-                    "송장수량": qty_values[idx] if idx < len(qty_values) else 1,
                 })
 
             if st.button("수정", use_container_width=True, key="reship_commit_edit_btn", type="secondary"):
@@ -3161,7 +3135,7 @@ def render_reship_page():
 
         with p2:
             st.subheader("Word 미리보기 · 재배송건.docx")
-            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽 위에 작은 숫자로 표시")
+            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽 위에 강조된 수량 숫자만 표시")
             word_preview_lines = []
             for _, r in applied_df.iterrows():
                 name = str(r.get("수취인", "") or "")
@@ -3226,7 +3200,7 @@ def render_reship_page():
             try:
                 template_bytes = TC_TEMPLATE_DEFAULT_PATH.read_bytes()
                 st.session_state["reship_generated_excel"] = build_tc_excel_bytes(template_bytes, tc_rows)
-                # Word에는 각 재배송 건을 한 번만 적고, 송장수량은 이름 왼쪽 위의 작은 숫자로 표시합니다.
+                # Word에는 각 재배송 건을 한 번만 적고, 송장수량은 이름 왼쪽 위의 강조된 위첨자 숫자로 표시합니다.
                 st.session_state["reship_generated_word"] = build_reship_docx(final_entries)
                 st.success("재배송송장.xlsx와 재배송건.docx를 생성했습니다.")
             except Exception as e:
