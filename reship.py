@@ -52,8 +52,9 @@ _FALLBACK_ADDRESS_RE = re.compile(
 )
 
 _LABEL_RE = re.compile(
-    r"(?:배송지\s*정보|수취인명|수령인명|받는\s*사람|연락처\s*1|연락처\s*2|연락처|전화번호|"
-    r"배송지|주소|상품명|상품\s*목록|상품|배송메모|배송\s*메모|배송메세지|배송메시지|요청사항)\s*[:：-]?",
+    r"(?:배송\s*정보\s*표|배송지\s*정보|배송\s*정보|수취인명|수령인명|받는\s*사람|"
+    r"연락처\s*1|연락처\s*2|연락처|전화번호|배송지\s*주소|배송지|주소|"
+    r"상품명|상품\s*목록|상품|배송메모|배송\s*메모|배송메세지|배송메시지|요청사항)\s*[:：-]?",
     re.IGNORECASE,
 )
 _DATE_NOISE_RE = re.compile(
@@ -61,8 +62,24 @@ _DATE_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 _MEMO_HINT_RE = re.compile(
-    r"문\s*앞|경비실|벨|전화|연락|부재|공동현관|비밀번호|호출|맡겨|놓아|놔|두고|두어|"
-    r"말아|주세요|부탁|수령실|택배함|직접|배송메모|배송\s*메모|요청사항",
+    r"문\s*앞|문앞|경비실|벨|전화|연락|부재|공동현관|공동\s*현관|비밀번호|비번|출입|호출|"
+    r"맡겨|놓아|놔|두고|두어|말아|주세요|부탁|수령실|택배함|직접|후문|정문|현관|"
+    r"배송메모|배송\s*메모|배송메세지|배송메시지|요청사항",
+    re.IGNORECASE,
+)
+
+# 배송메모가 문장이 아니라 출입코드만 있는 경우도 허용합니다.
+# 예: #123#24 / 1234# / *1234* / #2580 / 1234*
+# 단, '보꼬네485'의 485처럼 이름에 붙은 일반 숫자는 메모로 보지 않습니다.
+_ACCESS_CODE_RE = re.compile(
+    r"(?<![A-Za-z가-힣0-9])(?:"
+    r"[#*]\s*\d+(?:\s*[#*]\s*\d+)*(?:\s*[#*])?"
+    r"|\d+\s*[#*](?:\s*\d+)*(?:\s*[#*])?"
+    r")(?![A-Za-z가-힣0-9])"
+)
+
+_MEMO_LABEL_RE = re.compile(
+    r"(?:배송메모|배송\s*메모|배송메세지|배송메시지|요청사항)\s*[:：-]?\s*(.+)",
     re.IGNORECASE,
 )
 
@@ -142,7 +159,7 @@ def _extract_products(text: str, mapping_rules: Iterable[Dict]) -> tuple[List[st
 
 def _extract_labeled_name(text: str) -> str:
     m = re.search(
-        r"(?:수취인명|수령인명|받는\s*사람)\s*[:：-]?\s*([가-힣A-Za-z][가-힣A-Za-z .·ㆍ-]{1,29}?)"
+        r"(?:수취인명|수령인명|받는\s*사람)\s*[:：-]?\s*([가-힣A-Za-z][가-힣A-Za-z0-9 .·ㆍ_-]{1,39}?)"
         r"(?=\s*(?:연락처|전화번호|배송지|주소|상품|배송메모|배송\s*메모|$))",
         text,
         flags=re.IGNORECASE,
@@ -257,24 +274,48 @@ def _extract_address(text: str) -> tuple[str, str]:
 
     return "", work
 
+def _strip_quotes(text: str) -> str:
+    # 큰따옴표/작은따옴표 자체만 제거하고 안의 내용은 유지합니다.
+    # 예: "#123#24" -> #123#24 / "문앞에 놔주세요" -> 문앞에 놔주세요
+    return re.sub(r'["“”\'‘’]+', "", str(text or ""))
+
+
 def _cleanup_leftover(text: str) -> str:
     s = _LABEL_RE.sub(" ", text)
     s = _DATE_NOISE_RE.sub(" ", s)
     s = s.replace("<<PRODUCT>>", " ")
-    # 복사/붙여넣기 과정에서 요일 주위에 붙는 반복 따옴표를 배송메모로 남기지 않습니다.
-    # 예: 재배송 """"월요일"""" -> 재배송/요일/따옴표 모두 제거
-    s = re.sub(r'["“”\'‘’]+', " ", s)
+    s = _strip_quotes(s)
     s = re.sub(r"[,;/|]+", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip(" -:/")
 
 
+def _extract_explicit_memo(text: str) -> str:
+    """라벨이 붙은 배송메모는 내용 종류와 관계없이 우선 인정합니다.
+
+    따옴표는 문자만 제거하고 내부 내용은 보존합니다.
+    """
+    for raw_line in str(text or "").splitlines():
+        m = _MEMO_LABEL_RE.search(raw_line)
+        if not m:
+            continue
+        value = _strip_quotes(m.group(1)).strip()
+        # 라벨 뒤에 재배송 요일만 들어온 잡음은 메모로 보지 않습니다.
+        value = _DATE_NOISE_RE.sub(" ", value)
+        value = re.sub(r"\s+", " ", value).strip(" -:/")
+        if value:
+            return value[:100]
+    return ""
+
+
 def _extract_generic_name(leftover: str) -> tuple[str, str]:
-    # 메모 문구보다 앞에 있는 짧은 사람 이름을 우선합니다.
-    tokens = re.findall(r"[가-힣]{2,6}|[A-Za-z]{2,}(?:\s+[A-Za-z]{2,})?", leftover)
+    # 이름/상호명 뒤에 붙은 숫자까지 한 덩어리로 유지합니다.
+    # 예: 보꼬네485 / 카페24 / 제일상회2호점
+    tokens = re.findall(r"[가-힣A-Za-z][가-힣A-Za-z0-9·ㆍ_-]{1,39}", leftover)
     banned = {
-        "배송지", "정보", "연락처", "전화번호", "상품", "목록", "주소", "배송", "메모", "요청사항",
-        "문앞", "경비실", "공동현관", "비밀번호", "전화", "연락", "부재", "재배송",
+        "배송정보", "배송지", "정보", "표", "연락처", "전화번호", "상품", "목록", "주소",
+        "배송", "메모", "요청사항", "문앞", "경비실", "공동현관", "비밀번호", "비번",
+        "전화", "연락", "부재", "재배송",
     }
     for token in tokens:
         compact = _compact(token)
@@ -285,7 +326,6 @@ def _extract_generic_name(leftover: str) -> tuple[str, str]:
         # 행정구역/도로명처럼 보이는 토큰 제외
         if re.search(r"(?:특별시|광역시|시|군|구|동|읍|면|리|로|길|대로)$", token):
             continue
-        # 이름 후보를 제거한 나머지를 반환
         m = re.search(re.escape(token), leftover)
         if m:
             rest = leftover[: m.start()] + " " + leftover[m.end() :]
@@ -293,6 +333,27 @@ def _extract_generic_name(leftover: str) -> tuple[str, str]:
             rest = leftover
         return token.strip(), rest
     return "", leftover
+
+
+def _extract_safe_memo(leftover: str, explicit_memo: str = "") -> str:
+    """실제 배송요청으로 판단되는 내용만 배송메모로 반환합니다.
+
+    - '남은 글자 = 배송메모' 방식은 사용하지 않습니다.
+    - 명시적인 배송메모 라벨이 있으면 우선 사용합니다.
+    - 라벨이 없으면 배송 요청 키워드 또는 #/*가 포함된 출입코드가 있어야 합니다.
+    - 따라서 '배송정보 표', 이름 일부 숫자(보꼬네485의 485) 같은 잡음은 버립니다.
+    """
+    if explicit_memo:
+        return explicit_memo[:100]
+
+    s = _cleanup_leftover(leftover)
+    if not s:
+        return ""
+
+    if _MEMO_HINT_RE.search(s) or _ACCESS_CODE_RE.search(s):
+        return s[:100]
+
+    return ""
 
 
 def _split_blocks(raw_text: str) -> List[str]:
@@ -338,6 +399,7 @@ def parse_reship_text(raw_text: str, mapping_rules: Optional[Iterable[Dict]] = N
     for block in _split_blocks(raw_text):
         original = block
         labeled_name = _extract_labeled_name(original)
+        explicit_memo = _extract_explicit_memo(original)
 
         # 전화번호
         phone_match = _PHONE_RE.search(block)
@@ -370,9 +432,7 @@ def parse_reship_text(raw_text: str, mapping_rules: Optional[Iterable[Dict]] = N
         else:
             name, remaining = _extract_generic_name(remaining)
 
-        memo = _cleanup_leftover(remaining)
-        if memo and len(memo) > 100:
-            memo = memo[:100]
+        memo = _extract_safe_memo(remaining, explicit_memo=explicit_memo)
 
         results.append(
             {
