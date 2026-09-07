@@ -8,7 +8,7 @@ from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Mm, Pt
+from docx.shared import Mm, Pt, RGBColor
 
 
 # 재배송 상품명은 사용자가 입력한 표현을 그대로 유지합니다.
@@ -563,9 +563,9 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
         # 수량 표시는 본문보다 조금 크게 보여도 줄 위로 겹치지 않도록 일반 글자 위치를 사용합니다.
         count_prefix = f"({shipment_count}) " if shipment_count > 1 else ""
         if count_prefix:
-            # (N)은 16pt, 이름은 14pt이므로 실제 표시 크기에 맞춰 들여쓰기 폭도 각각 계산합니다.
+            # (N)도 본문과 같은 14pt이므로 같은 크기를 기준으로 들여쓰기 폭을 계산합니다.
             indent_pt = min(
-                _product_width_pt(count_prefix, 16) + _prefix_width_pt(prefix, 14),
+                _product_width_pt(count_prefix, 14) + _prefix_width_pt(prefix, 14),
                 column_width_pt * 0.55,
             )
         else:
@@ -584,8 +584,9 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
 
         if shipment_count > 1:
             count_run = p.add_run(f"({shipment_count})")
-            _set_run_font(count_run, font_size=16)
-            count_run.font.bold = True
+            _set_run_font(count_run, font_size=14)
+            count_run.font.bold = False
+            count_run.font.color.rgb = RGBColor(0xD9, 0x9A, 0x9A)
             spacer_run = p.add_run(" ")
             _set_run_font(spacer_run)
 

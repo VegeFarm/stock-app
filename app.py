@@ -1,4 +1,5 @@
 import io
+import html
 import os
 import re
 import json
@@ -3010,9 +3011,53 @@ def render_reship_page():
                 rows.append(base.copy())
         return _normalize_reship_df(rows)
 
+    def _transient_success(message: str, duration_seconds: float = 3.0) -> None:
+        """성공 안내를 지정 시간 동안만 표시하고 자동으로 접습니다."""
+        safe_message = html.escape(str(message or ""))
+        duration = max(0.5, float(duration_seconds))
+        st.markdown(
+            f"""
+            <style>
+            @keyframes reship-success-hide {{
+                0%, 84% {{
+                    opacity: 1;
+                    max-height: 80px;
+                    margin-top: 0;
+                    margin-bottom: 1rem;
+                    padding-top: 0.75rem;
+                    padding-bottom: 0.75rem;
+                    border-width: 1px;
+                }}
+                100% {{
+                    opacity: 0;
+                    max-height: 0;
+                    margin-top: 0;
+                    margin-bottom: 0;
+                    padding-top: 0;
+                    padding-bottom: 0;
+                    border-width: 0;
+                }}
+            }}
+            .reship-transient-success {{
+                box-sizing: border-box;
+                overflow: hidden;
+                border: 1px solid rgba(33, 122, 79, 0.28);
+                border-radius: 0.5rem;
+                background: rgba(221, 247, 232, 0.88);
+                color: rgb(22, 91, 58);
+                padding-left: 0.9rem;
+                padding-right: 0.9rem;
+                animation: reship-success-hide {duration:.2f}s ease forwards;
+            }}
+            </style>
+            <div class="reship-transient-success">✅ {safe_message}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     flash = st.session_state.pop("reship_flash_message", "")
     if flash:
-        st.success(flash)
+        _transient_success(flash, 3.0)
 
     left, right = st.columns([1, 1], gap="large")
 
@@ -3120,7 +3165,7 @@ def render_reship_page():
         p1, p2 = st.columns(2, gap="large")
 
         with p1:
-            st.subheader("엑셀 미리보기 · 재배송송장.xlsx")
+            st.subheader("엑셀 미리보기")
             excel_preview = pd.DataFrame({
                 "상품명": [TC_PRODUCT_NAME_FIXED] * len(excel_applied_df),
                 "배송예정일": [req_day_str] * len(excel_applied_df),
@@ -3134,16 +3179,20 @@ def render_reship_page():
             st.caption("송장수량만큼 같은 정보가 실제 엑셀 행으로 추가됩니다. 화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
 
         with p2:
-            st.subheader("Word 미리보기 · 재배송건.docx")
-            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽에 (2), (3) 형태로 표시")
+            st.subheader("Word 미리보기")
+            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽에 연한 빨강 (2), (3) 형태로 표시")
             word_preview_lines = []
             for _, r in applied_df.iterrows():
-                name = str(r.get("수취인", "") or "")
-                products = str(r.get("상품목록", "") or "")
+                name = html.escape(str(r.get("수취인", "") or ""))
+                products = html.escape(str(r.get("상품목록", "") or ""))
                 qty = _normalize_count(r.get("송장수량", 1))
-                qty_prefix = f"({qty}) " if qty > 1 else ""
-                word_preview_lines.append(f"{qty_prefix}{name} - {products}" if name else f"{qty_prefix}{products}")
-            st.text("\n\n".join(word_preview_lines))
+                qty_prefix = f'<span style="color:#D99A9A;">({qty})</span> ' if qty > 1 else ""
+                content = f"{qty_prefix}{name} - {products}" if name else f"{qty_prefix}{products}"
+                word_preview_lines.append(f'<div style="margin-bottom:0.9rem;">{content}</div>')
+            st.markdown(
+                '<div style="font-size:14pt; line-height:1.35;">' + "".join(word_preview_lines) + "</div>",
+                unsafe_allow_html=True,
+            )
 
     st.markdown("---")
     required_missing = []
@@ -3202,7 +3251,7 @@ def render_reship_page():
                 st.session_state["reship_generated_excel"] = build_tc_excel_bytes(template_bytes, tc_rows)
                 # Word에는 각 재배송 건을 한 번만 적고, 송장수량은 이름 왼쪽에 (2), (3) 형태로 표시합니다.
                 st.session_state["reship_generated_word"] = build_reship_docx(final_entries)
-                st.success("재배송송장.xlsx와 재배송건.docx를 생성했습니다.")
+                _transient_success("재배송송장.xlsx와 재배송건.docx를 생성했습니다.", 3.0)
             except Exception as e:
                 st.error(f"재배송 파일 생성 실패: {e}")
                 st.exception(e)
