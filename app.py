@@ -3015,35 +3015,55 @@ def render_reship_page():
                 },
             )
 
-    if edited_df is None:
-        edited_df = pd.DataFrame(columns=columns)
-    if not isinstance(edited_df, pd.DataFrame):
-        edited_df = pd.DataFrame(edited_df)
+            # 자동 분석 결과를 직접 고친 뒤, 사용자가 '반영'을 눌렀을 때
+            # 미리보기와 파일 생성 데이터에 확정 반영합니다.
+            if st.button("반영", use_container_width=True, key="reship_apply_btn"):
+                apply_df = edited_df.copy() if isinstance(edited_df, pd.DataFrame) else pd.DataFrame(edited_df)
+                for c in columns:
+                    if c not in apply_df.columns:
+                        apply_df[c] = ""
+                apply_df = apply_df[columns].fillna("")
+                for c in columns:
+                    apply_df[c] = apply_df[c].astype(str).str.strip()
+                apply_df = apply_df[
+                    apply_df.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
+                ].reset_index(drop=True)
+                st.session_state["reship_rows"] = apply_df.to_dict("records")
+                st.session_state.pop("reship_generated_excel", None)
+                st.session_state.pop("reship_generated_word", None)
+                result_df = apply_df.copy()
+                st.success("수정 내용이 반영되었습니다.")
+
+    # 미리보기와 파일 생성은 마지막으로 '반영'된 데이터만 사용합니다.
+    applied_df = result_df.copy()
+    if applied_df is None:
+        applied_df = pd.DataFrame(columns=columns)
+    if not isinstance(applied_df, pd.DataFrame):
+        applied_df = pd.DataFrame(applied_df)
     for c in columns:
-        if c not in edited_df.columns:
-            edited_df[c] = ""
-    edited_df = edited_df[columns].copy()
-    edited_df = edited_df.fillna("")
+        if c not in applied_df.columns:
+            applied_df[c] = ""
+    applied_df = applied_df[columns].copy().fillna("")
     for c in columns:
-        edited_df[c] = edited_df[c].astype(str).str.strip()
-    edited_df = edited_df[
-        edited_df.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
+        applied_df[c] = applied_df[c].astype(str).str.strip()
+    applied_df = applied_df[
+        applied_df.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
     ].reset_index(drop=True)
 
-    if len(edited_df):
+    if len(applied_df):
         st.markdown("---")
         p1, p2 = st.columns(2, gap="large")
 
         with p1:
             st.subheader("엑셀 미리보기 · 재배송송장.xlsx")
             excel_preview = pd.DataFrame({
-                "상품명": [TC_PRODUCT_NAME_FIXED] * len(edited_df),
-                "배송예정일": [req_day_str] * len(edited_df),
-                "배송유형": ["자동"] * len(edited_df),
-                "수취인": edited_df["수취인"].tolist(),
-                "연락처": edited_df["연락처"].tolist(),
-                "주소": edited_df["주소"].tolist(),
-                "배송메모": edited_df["배송메모"].tolist(),
+                "상품명": [TC_PRODUCT_NAME_FIXED] * len(applied_df),
+                "배송예정일": [req_day_str] * len(applied_df),
+                "배송유형": ["자동"] * len(applied_df),
+                "수취인": applied_df["수취인"].tolist(),
+                "연락처": applied_df["연락처"].tolist(),
+                "주소": applied_df["주소"].tolist(),
+                "배송메모": applied_df["배송메모"].tolist(),
             })
             st.dataframe(excel_preview, hide_index=True, use_container_width=True)
             st.caption("화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
@@ -3052,7 +3072,7 @@ def render_reship_page():
             st.subheader("Word 미리보기 · 재배송건.docx")
             st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 둘째 줄부터 상품 시작 위치에 맞춤")
             word_preview_lines = []
-            for _, r in edited_df.iterrows():
+            for _, r in applied_df.iterrows():
                 name = r["수취인"]
                 products = r["상품목록"]
                 word_preview_lines.append(f"{name} - {products}" if name else products)
@@ -3061,8 +3081,8 @@ def render_reship_page():
 
     st.markdown("---")
     required_missing = []
-    if len(edited_df):
-        for idx, r in edited_df.iterrows():
+    if len(applied_df):
+        for idx, r in applied_df.iterrows():
             missing = [c for c in ("수취인", "연락처", "주소") if not str(r[c]).strip()]
             if missing:
                 required_missing.append(f"{idx + 1}번: {', '.join(missing)}")
@@ -3070,10 +3090,9 @@ def render_reship_page():
     if required_missing:
         st.warning("파일 생성 전에 확인이 필요한 항목이 있습니다. " + " / ".join(required_missing))
 
-    generate_disabled = (len(edited_df) == 0) or bool(required_missing)
+    generate_disabled = (len(applied_df) == 0) or bool(required_missing)
     if st.button(
         "📄 재배송 파일 생성하기 (엑셀 + Word)",
-        type="primary",
         use_container_width=True,
         disabled=generate_disabled,
         key="reship_generate_btn",
@@ -3081,7 +3100,7 @@ def render_reship_page():
         if not TC_TEMPLATE_DEFAULT_PATH.exists():
             st.error("앱 폴더에 '컬리주문_등록양식.xlsx' 파일이 없습니다.")
         else:
-            final_entries = edited_df.to_dict("records")
+            final_entries = applied_df.to_dict("records")
             tc_rows = []
             for r in final_entries:
                 receiver = _limit_tc_name_20(r.get("수취인", ""))

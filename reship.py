@@ -60,6 +60,15 @@ _MEMO_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 여러 줄 주소가 들어올 때 주소를 끝내는 명확한 필드 라벨입니다.
+# 예: 도로명 주소 다음 줄의 "1층 매장"은 주소에 붙이고,
+# "연락처1", "상품", "배송메모" 등이 나오면 주소를 종료합니다.
+_ADDRESS_FIELD_BOUNDARY_RE = re.compile(
+    r"^(?:수취인명|수령인명|받는\s*사람|연락처\s*1|연락처\s*2|연락처|전화번호|"
+    r"상품명|상품\s*목록|상품|배송메모|배송\s*메모|배송메세지|배송메시지|요청사항)\b",
+    re.IGNORECASE,
+)
+
 
 def _compact(s: str) -> str:
     return re.sub(r"\s+", "", str(s or "")).strip().lower()
@@ -182,37 +191,65 @@ def _extract_labeled_name(text: str) -> str:
 
 
 def _extract_address(text: str) -> tuple[str, str]:
-    """주소와 주소를 제거한 텍스트를 반환합니다."""
+    """주소와 주소를 제거한 텍스트를 반환합니다.
+
+    여러 줄 주소를 지원합니다. 도로명 주소가 시작된 뒤 다음 줄이
+    상세주소처럼 보이면 주소에 이어 붙이고, 연락처/상품/배송메모 등
+    다음 명확한 필드가 시작되면 주소를 종료합니다.
+    """
     work = text
 
-    # 여러 줄 입력에서는 도로명 주소가 있는 해당 줄을 우선 사용합니다.
-    # 이렇게 해야 다음 줄의 수취인명/전화번호가 주소 상세로 붙는 것을 막을 수 있습니다.
+    def _clean_address_label(value: str) -> str:
+        # 주소 결과에는 '배송지', '주소', '배송지 주소' 같은 라벨을 남기지 않습니다.
+        value = re.sub(r"^\s*(?:배송지\s*주소|배송지|주소)\s*[:：-]?\s*", "", value, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", value).strip(" ,;/")
+
+    def _is_address_boundary(line: str) -> bool:
+        stripped = str(line or "").strip()
+        if not stripped:
+            return True
+        if _ADDRESS_FIELD_BOUNDARY_RE.search(stripped):
+            return True
+        if "<<PRODUCT>>" in stripped:
+            return True
+        if _MEMO_HINT_RE.search(stripped):
+            return True
+        if re.search(r"(?:월|화|수|목|금|토|일)요일", stripped, re.IGNORECASE):
+            return True
+        if re.search(r"재배송", stripped, re.IGNORECASE):
+            return True
+        return False
+
+    # 1) 여러 줄 입력: 도로명 주소가 있는 줄부터 상세주소 줄을 이어 붙입니다.
     if "\n" in work:
         lines = work.splitlines()
         for idx, line in enumerate(lines):
             if _ADDRESS_START_RE.search(line) and _ADDRESS_ROAD_RE.search(line):
-                candidate = line
-                boundaries = []
-                for pat in (
-                    re.compile(r"<<PRODUCT>>"),
-                    _MEMO_HINT_RE,
-                    re.compile(r"(?:월|화|수|목|금|토|일)요일", re.IGNORECASE),
-                    re.compile(r"재배송", re.IGNORECASE),
-                ):
-                    mm = pat.search(candidate)
-                    if mm and mm.start() > 0:
-                        boundaries.append(mm.start())
-                if boundaries:
-                    candidate = candidate[: min(boundaries)]
-                candidate = re.sub(r"\s+", " ", candidate).strip(" ,;/")
-                lines[idx] = line[len(candidate):] if line.startswith(candidate) else ""
-                return candidate, "\n".join(lines)
+                collected = [line]
+                consumed_indexes = [idx]
 
+                # 다음 줄이 상세주소라면 계속 붙입니다.
+                # 예: '1층 닭 한스포', '101동 1204호', '지하1층 매장'
+                j = idx + 1
+                while j < len(lines):
+                    nxt = lines[j]
+                    if _is_address_boundary(nxt):
+                        break
+                    collected.append(nxt)
+                    consumed_indexes.append(j)
+                    j += 1
+
+                candidate = _clean_address_label(" ".join(collected))
+                if _ADDRESS_ROAD_RE.search(candidate):
+                    for k in consumed_indexes:
+                        lines[k] = ""
+                    return candidate, "\n".join(lines)
+
+    # 2) 한 줄 입력: 기존처럼 주소 시작점부터 상품/메모/재배송 문구 전까지 사용합니다.
     starts = list(_ADDRESS_START_RE.finditer(work))
     if starts:
         start = starts[0].start()
         tail = work[start:]
-        # 상품/메모/재배송 문구가 시작되는 지점에서 주소 종료
         boundaries = []
         for pat in (
             re.compile(r"<<PRODUCT>>"),
@@ -224,31 +261,39 @@ def _extract_address(text: str) -> tuple[str, str]:
             if mm and mm.start() > 0:
                 boundaries.append(mm.start())
         end_rel = min(boundaries) if boundaries else len(tail)
-        candidate = tail[:end_rel]
-        candidate = re.sub(r"\s+", " ", candidate).strip(" ,;/")
-        # 실제 도로명 패턴이 포함된 경우에만 주소로 확정
+        candidate = _clean_address_label(tail[:end_rel])
         if _ADDRESS_ROAD_RE.search(candidate):
             end = start + end_rel
             remaining = work[:start] + " " + work[end:]
             return candidate, remaining
 
-    # 서울특별시 등이 생략되고 '마포구 신촌로 260-1 ...' 형태인 경우
+    # 3) 서울특별시 등이 생략되고 '마포구 신촌로 260-1 ...' 형태인 경우
     mm = _FALLBACK_ADDRESS_RE.search(work)
     if mm:
-        candidate = re.sub(r"\s+", " ", mm.group(0)).strip(" ,;/")
+        candidate = _clean_address_label(mm.group(0))
         remaining = work[: mm.start()] + " " + work[mm.end() :]
         return candidate, remaining
 
-    # 줄 단위 최종 보조: 로/길/대로 + 번지가 있는 줄
+    # 4) 줄 단위 최종 보조: 로/길/대로 + 번지가 있는 줄
     lines = work.splitlines()
     for idx, line in enumerate(lines):
         if _ADDRESS_ROAD_RE.search(line):
-            cleaned = re.sub(r"\s+", " ", line).strip(" ,;/")
-            lines[idx] = ""
+            collected = [line]
+            consumed_indexes = [idx]
+            j = idx + 1
+            while j < len(lines):
+                nxt = lines[j]
+                if _is_address_boundary(nxt):
+                    break
+                collected.append(nxt)
+                consumed_indexes.append(j)
+                j += 1
+            cleaned = _clean_address_label(" ".join(collected))
+            for k in consumed_indexes:
+                lines[k] = ""
             return cleaned, "\n".join(lines)
 
     return "", work
-
 
 def _cleanup_leftover(text: str) -> str:
     s = _LABEL_RE.sub(" ", text)
