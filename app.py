@@ -3180,7 +3180,6 @@ def render_reship_page():
 
         with p2:
             st.subheader("Word 미리보기")
-            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽에 연한 빨강 (2), (3) 형태로 표시")
             word_preview_lines = []
             for _, r in applied_df.iterrows():
                 name = html.escape(str(r.get("수취인", "") or ""))
