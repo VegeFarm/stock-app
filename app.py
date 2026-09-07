@@ -2961,7 +2961,7 @@ def render_reship_page():
     st.info(f"배송예정일은 생성일의 다음날로 자동 입력됩니다.  ·  배송예정일: {req_day_str}  ·  배송유형: 자동")
 
     mapping_rules = load_mapping_rules()
-    text_columns = ["수취인", "연락처", "주소", "배송메모", "상품목록"]
+    text_columns = ["수취인", "연락처", "주소", "상품목록", "배송메모"]
     # 분석 결과 표에서 송장수량을 수취인명 바로 왼쪽(첫 번째 열)에 표시합니다.
     columns = ["송장수량"] + text_columns
 
@@ -3010,10 +3010,6 @@ def render_reship_page():
                 rows.append(base.copy())
         return _normalize_reship_df(rows)
 
-    def _superscript_number(value: int) -> str:
-        table = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
-        return str(_normalize_count(value)).translate(table)
-
     flash = st.session_state.pop("reship_flash_message", "")
     if flash:
         st.success(flash)
@@ -3057,7 +3053,7 @@ def render_reship_page():
     committed_df = _normalize_reship_df(st.session_state.get("reship_rows", []))
 
     with right:
-        st.subheader("2. 분석 결과 및 수정")
+        st.subheader("2. 결과 및 수정")
 
         if committed_df.empty:
             st.caption("왼쪽에 재배송 정보를 붙여넣고 '반영'을 누르면 이곳에 표시됩니다.")
@@ -3076,19 +3072,23 @@ def render_reship_page():
                 use_container_width=True,
                 key=f"reship_table_editor_{editor_ver}",
                 column_config={
+                    # 첫 번째 열은 송장 수량 숫자만 보이도록 제목을 비우고 최소 폭으로 둡니다.
                     "송장수량": st.column_config.NumberColumn(
-                        "송장수량",
+                        "",
                         min_value=1,
                         step=1,
                         format="%d",
-                        width="small",
-                        help="엑셀에 생성할 동일 송장 행 수입니다. 2 이상이면 Word에는 이름 왼쪽 위에 수량 숫자만 표시됩니다.",
+                        width=55,
+                        help="엑셀에 생성할 동일 송장 행 수입니다. 숫자를 직접 수정한 뒤 아래 '수정'을 누르면 반영됩니다.",
                     ),
                     "수취인": st.column_config.TextColumn("수취인명", width="small"),
-                    "연락처": st.column_config.TextColumn("연락처", width="medium"),
+                    # 연락처는 010-0000-0000 한 줄이 들어가는 정도로만 사용합니다.
+                    "연락처": st.column_config.TextColumn("연락처", width=140),
+                    # 주소 열은 기존 크기를 유지합니다.
                     "주소": st.column_config.TextColumn("주소", width="large"),
-                    "배송메모": st.column_config.TextColumn("배송메모", width="large"),
+                    # 주소 오른쪽에는 상품, 마지막에는 배송메모를 배치합니다.
                     "상품목록": st.column_config.TextColumn("상품", width="large"),
+                    "배송메모": st.column_config.TextColumn("배송메모", width="large"),
                 },
             )
 
@@ -3135,13 +3135,13 @@ def render_reship_page():
 
         with p2:
             st.subheader("Word 미리보기 · 재배송건.docx")
-            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽 위에 강조된 수량 숫자만 표시")
+            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽에 (2), (3) 형태로 표시")
             word_preview_lines = []
             for _, r in applied_df.iterrows():
                 name = str(r.get("수취인", "") or "")
                 products = str(r.get("상품목록", "") or "")
                 qty = _normalize_count(r.get("송장수량", 1))
-                qty_prefix = f"{_superscript_number(qty)} " if qty > 1 else ""
+                qty_prefix = f"({qty}) " if qty > 1 else ""
                 word_preview_lines.append(f"{qty_prefix}{name} - {products}" if name else f"{qty_prefix}{products}")
             st.text("\n\n".join(word_preview_lines))
 
@@ -3200,7 +3200,7 @@ def render_reship_page():
             try:
                 template_bytes = TC_TEMPLATE_DEFAULT_PATH.read_bytes()
                 st.session_state["reship_generated_excel"] = build_tc_excel_bytes(template_bytes, tc_rows)
-                # Word에는 각 재배송 건을 한 번만 적고, 송장수량은 이름 왼쪽 위의 강조된 위첨자 숫자로 표시합니다.
+                # Word에는 각 재배송 건을 한 번만 적고, 송장수량은 이름 왼쪽에 (2), (3) 형태로 표시합니다.
                 st.session_state["reship_generated_word"] = build_reship_docx(final_entries)
                 st.success("재배송송장.xlsx와 재배송건.docx를 생성했습니다.")
             except Exception as e:

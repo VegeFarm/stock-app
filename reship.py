@@ -514,8 +514,8 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
     - 첫 줄: 이름 - 상품...
     - 다음 줄: 상품 시작 위치에 맞춰 들여쓰기
     - 수취인 사이: 빈 줄 1줄
-    - 송장수량이 2 이상이면 이름 왼쪽 위에 큰 위첨자 수량 숫자만 표시
-      (상품 문구는 한 번만 표시하며 '(수량 N개)' 같은 보조 문구는 넣지 않음)
+    - 송장수량이 2 이상이면 이름 왼쪽에 (2), (3) 형태로 표시
+      (상품 문구는 한 번만 표시하며 별도의 수량 설명문은 넣지 않음)
     """
     doc = Document()
     section = doc.sections[0]
@@ -552,11 +552,17 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
             shipment_count = 1
 
         prefix = f"{name} - " if name else ""
-        # 송장수량이 2 이상이면 이름 왼쪽 위에 수량 숫자만 표시합니다.
-        # 둘째 줄의 상품 시작 위치는 이 숫자까지 포함한 첫 줄의 상품 시작점에 맞춥니다.
-        count_prefix = f"{shipment_count} " if shipment_count > 1 else ""
-        indent_basis = count_prefix + prefix
-        indent_pt = min(_prefix_width_pt(indent_basis, 14), column_width_pt * 0.55)
+        # 송장수량이 2 이상이면 첨자가 아니라 이름 왼쪽에 (2), (3) 형태로 표시합니다.
+        # 수량 표시는 본문보다 조금 크게 보여도 줄 위로 겹치지 않도록 일반 글자 위치를 사용합니다.
+        count_prefix = f"({shipment_count}) " if shipment_count > 1 else ""
+        if count_prefix:
+            # (N)은 16pt, 이름은 14pt이므로 실제 표시 크기에 맞춰 들여쓰기 폭도 각각 계산합니다.
+            indent_pt = min(
+                _product_width_pt(count_prefix, 16) + _prefix_width_pt(prefix, 14),
+                column_width_pt * 0.55,
+            )
+        else:
+            indent_pt = min(_prefix_width_pt(prefix, 14), column_width_pt * 0.55)
         product_area_pt = max(60.0, column_width_pt - indent_pt - 3.0)
         product_lines = _wrap_products(products, product_area_pt, 14)
 
@@ -570,10 +576,9 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
         pf.keep_together = True
 
         if shipment_count > 1:
-            count_run = p.add_run(str(shipment_count))
-            _set_run_font(count_run, font_size=11)
+            count_run = p.add_run(f"({shipment_count})")
+            _set_run_font(count_run, font_size=16)
             count_run.font.bold = True
-            count_run.font.superscript = True
             spacer_run = p.add_run(" ")
             _set_run_font(spacer_run)
 
