@@ -2961,7 +2961,14 @@ def render_reship_page():
     st.info(f"배송예정일은 생성일의 다음날로 자동 입력됩니다.  ·  배송예정일: {req_day_str}  ·  배송유형: 자동")
 
     mapping_rules = load_mapping_rules()
-    columns = ["수취인", "연락처", "주소", "배송메모", "상품목록"]
+    text_columns = ["수취인", "연락처", "주소", "배송메모", "상품목록"]
+    columns = text_columns + ["송장수량"]
+
+    def _normalize_count(value) -> int:
+        try:
+            return max(1, int(float(str(value or 1).strip())))
+        except Exception:
+            return 1
 
     def _normalize_reship_df(data) -> pd.DataFrame:
         if data is None:
@@ -2970,21 +2977,45 @@ def render_reship_page():
             out = data.copy()
         else:
             out = pd.DataFrame(data)
-        for c in columns:
+
+        for c in text_columns:
             if c not in out.columns:
                 out[c] = ""
-        out = out[columns].fillna("")
-        for c in columns:
-            out[c] = out[c].astype(str).str.strip()
+        if "송장수량" not in out.columns:
+            out["송장수량"] = 1
+
+        out = out[columns].copy()
+        for c in text_columns:
+            out[c] = out[c].fillna("").astype(str).str.strip()
+        out["송장수량"] = out["송장수량"].apply(_normalize_count)
+
         if len(out):
             out = out[
-                out.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
+                out.apply(lambda r: any(str(r.get(c, "")).strip() for c in text_columns), axis=1)
             ].reset_index(drop=True)
         return out
 
     def _clear_reship_generated() -> None:
         st.session_state.pop("reship_generated_excel", None)
         st.session_state.pop("reship_generated_word", None)
+
+    def _expand_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+        """송장수량만큼 엑셀용 행을 반복합니다. Word용 데이터는 반복하지 않습니다."""
+        rows = []
+        for _, r in _normalize_reship_df(df).iterrows():
+            qty = _normalize_count(r.get("송장수량", 1))
+            base = r.to_dict()
+            for _ in range(qty):
+                rows.append(base.copy())
+        return _normalize_reship_df(rows)
+
+    def _superscript_number(value: int) -> str:
+        table = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+        return str(_normalize_count(value)).translate(table)
+
+    flash = st.session_state.pop("reship_flash_message", "")
+    if flash:
+        st.success(flash)
 
     left, right = st.columns([1, 1], gap="large")
 
@@ -3011,71 +3042,116 @@ def render_reship_page():
                 parsed_rows = parse_reship_text(raw_text, mapping_rules=mapping_rules)
                 parsed_df = _normalize_reship_df(parsed_rows)
                 st.session_state["reship_rows"] = parsed_df.to_dict("records")
-                st.session_state["reship_editing"] = False
                 st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
                 _clear_reship_generated()
-                st.success("붙여넣은 내용이 반영되었습니다.")
+                st.session_state["reship_flash_message"] = "붙여넣은 내용이 반영되었습니다."
+                st.rerun()
             else:
                 st.session_state["reship_rows"] = []
-                st.session_state["reship_editing"] = False
                 st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
                 _clear_reship_generated()
-                st.info("입력 내용이 비어 있어 재배송 분석 결과를 비웠습니다.")
+                st.session_state["reship_flash_message"] = "입력 내용이 비어 있어 재배송 분석 결과를 비웠습니다."
+                st.rerun()
 
     committed_df = _normalize_reship_df(st.session_state.get("reship_rows", []))
-    effective_df = committed_df.copy()
 
     with right:
         st.subheader("2. 분석 결과 및 수정")
 
         if committed_df.empty:
             st.caption("왼쪽에 재배송 정보를 붙여넣고 '반영'을 누르면 이곳에 표시됩니다.")
-        elif st.session_state.get("reship_editing", False):
-            # '수정'을 누른 동안에는 직접 고친 값이 미리보기와 파일 생성에 즉시 사용됩니다.
-            # '수정 완료'를 누르면 해당 값이 확정 저장되고, '취소'하면 수정 전 값으로 돌아갑니다.
-            editor_ver = int(st.session_state.get("reship_editor_version", 0))
-            edited_df = st.data_editor(
-                committed_df,
-                num_rows="dynamic",
-                hide_index=True,
-                use_container_width=True,
-                key=f"reship_editor_{editor_ver}",
-                column_config={
-                    "수취인": st.column_config.TextColumn("수취인", width="small"),
-                    "연락처": st.column_config.TextColumn("연락처", width="medium"),
-                    "주소": st.column_config.TextColumn("주소", width="large"),
-                    "배송메모": st.column_config.TextColumn("배송메모", width="large"),
-                    "상품목록": st.column_config.TextColumn("상품목록", width="large"),
-                },
-            )
-            effective_df = _normalize_reship_df(edited_df)
-            # 수정 중에는 기존에 만들어 둔 파일이 현재 화면 값과 달라질 수 있으므로 숨깁니다.
-            _clear_reship_generated()
-
-            edit_c1, edit_c2 = st.columns(2)
-            with edit_c1:
-                if st.button("수정 완료", use_container_width=True, key="reship_edit_done_btn", type="secondary"):
-                    st.session_state["reship_rows"] = effective_df.to_dict("records")
-                    st.session_state["reship_editing"] = False
-                    st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
-                    _clear_reship_generated()
-                    st.rerun()
-            with edit_c2:
-                if st.button("취소", use_container_width=True, key="reship_edit_cancel_btn", type="secondary"):
-                    st.session_state["reship_editing"] = False
-                    st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
-                    _clear_reship_generated()
-                    st.rerun()
         else:
-            st.dataframe(committed_df, hide_index=True, use_container_width=True)
-            if st.button("수정", use_container_width=True, key="reship_edit_btn", type="secondary"):
-                st.session_state["reship_editing"] = True
-                st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
+            st.caption("내용은 바로 고칠 수 있습니다. 고친 뒤 아래 '수정' 버튼을 눌러야 엑셀·Word에 반영됩니다.")
+            editor_ver = int(st.session_state.get("reship_editor_version", 0))
+            draft_rows = []
+
+            for idx, row in committed_df.iterrows():
+                st.markdown(f"**{idx + 1}. 재배송 건**")
+
+                name_key = f"reship_draft_{editor_ver}_{idx}_name"
+                phone_key = f"reship_draft_{editor_ver}_{idx}_phone"
+                address_key = f"reship_draft_{editor_ver}_{idx}_address"
+                memo_key = f"reship_draft_{editor_ver}_{idx}_memo"
+                products_key = f"reship_draft_{editor_ver}_{idx}_products"
+                qty_key = f"reship_draft_{editor_ver}_{idx}_qty"
+
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    name = st.text_input(
+                        "수취인명",
+                        value=str(row.get("수취인", "") or ""),
+                        key=name_key,
+                    )
+                with c2:
+                    phone = st.text_input(
+                        "연락처",
+                        value=str(row.get("연락처", "") or ""),
+                        key=phone_key,
+                    )
+
+                address = st.text_area(
+                    "주소",
+                    value=str(row.get("주소", "") or ""),
+                    height=70,
+                    key=address_key,
+                )
+                memo = st.text_area(
+                    "배송메모",
+                    value=str(row.get("배송메모", "") or ""),
+                    height=70,
+                    key=memo_key,
+                )
+                products = st.text_area(
+                    "상품",
+                    value=str(row.get("상품목록", "") or ""),
+                    height=70,
+                    key=products_key,
+                )
+
+                if qty_key not in st.session_state:
+                    st.session_state[qty_key] = _normalize_count(row.get("송장수량", 1))
+
+                qlabel, qminus, qvalue, qplus = st.columns([2.0, 0.65, 0.7, 0.65])
+                with qlabel:
+                    st.markdown("**송장수량**")
+                    st.caption("엑셀 행 수 · Word에는 작은 숫자로 표시")
+                with qminus:
+                    if st.button("−", key=f"{qty_key}_minus", use_container_width=True):
+                        st.session_state[qty_key] = max(1, _normalize_count(st.session_state.get(qty_key, 1)) - 1)
+                        st.rerun()
+                with qvalue:
+                    st.markdown(
+                        f"<div style='text-align:center; font-size:1.15rem; padding-top:0.35rem;'><b>{_normalize_count(st.session_state.get(qty_key, 1))}</b></div>",
+                        unsafe_allow_html=True,
+                    )
+                with qplus:
+                    if st.button("+", key=f"{qty_key}_plus", use_container_width=True):
+                        st.session_state[qty_key] = _normalize_count(st.session_state.get(qty_key, 1)) + 1
+                        st.rerun()
+
+                draft_rows.append({
+                    "수취인": str(name or "").strip(),
+                    "연락처": str(phone or "").strip(),
+                    "주소": str(address or "").strip(),
+                    "배송메모": str(memo or "").strip(),
+                    "상품목록": str(products or "").strip(),
+                    "송장수량": _normalize_count(st.session_state.get(qty_key, 1)),
+                })
+
+                if idx < len(committed_df) - 1:
+                    st.markdown("---")
+
+            if st.button("수정", use_container_width=True, key="reship_commit_edit_btn", type="secondary"):
+                updated_df = _normalize_reship_df(draft_rows)
+                st.session_state["reship_rows"] = updated_df.to_dict("records")
+                st.session_state["reship_editor_version"] = editor_ver + 1
                 _clear_reship_generated()
+                st.session_state["reship_flash_message"] = "수정한 내용이 엑셀·Word 생성 데이터에 반영되었습니다."
                 st.rerun()
 
-    # 파일 미리보기와 생성은 반영된 값 또는 현재 '수정' 중인 값을 사용합니다.
-    applied_df = _normalize_reship_df(effective_df)
+    # 미리보기와 파일 생성은 '반영' 또는 '수정'으로 확정된 값만 사용합니다.
+    applied_df = _normalize_reship_df(st.session_state.get("reship_rows", []))
+    excel_applied_df = _expand_for_excel(applied_df)
 
     if len(applied_df):
         st.markdown("---")
@@ -3084,26 +3160,27 @@ def render_reship_page():
         with p1:
             st.subheader("엑셀 미리보기 · 재배송송장.xlsx")
             excel_preview = pd.DataFrame({
-                "상품명": [TC_PRODUCT_NAME_FIXED] * len(applied_df),
-                "배송예정일": [req_day_str] * len(applied_df),
-                "배송유형": ["자동"] * len(applied_df),
-                "수취인": applied_df["수취인"].tolist(),
-                "연락처": applied_df["연락처"].tolist(),
-                "주소": applied_df["주소"].tolist(),
-                "배송메모": applied_df["배송메모"].tolist(),
+                "상품명": [TC_PRODUCT_NAME_FIXED] * len(excel_applied_df),
+                "배송예정일": [req_day_str] * len(excel_applied_df),
+                "배송유형": ["자동"] * len(excel_applied_df),
+                "수취인": excel_applied_df["수취인"].tolist(),
+                "연락처": excel_applied_df["연락처"].tolist(),
+                "주소": excel_applied_df["주소"].tolist(),
+                "배송메모": excel_applied_df["배송메모"].tolist(),
             })
             st.dataframe(excel_preview, hide_index=True, use_container_width=True)
-            st.caption("화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
+            st.caption("송장수량만큼 같은 정보가 실제 엑셀 행으로 추가됩니다. 화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
 
         with p2:
             st.subheader("Word 미리보기 · 재배송건.docx")
-            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 둘째 줄부터 상품 시작 위치에 맞춤")
+            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 송장수량 2 이상은 이름 왼쪽 위에 작은 숫자로 표시")
             word_preview_lines = []
             for _, r in applied_df.iterrows():
-                name = r["수취인"]
-                products = r["상품목록"]
-                word_preview_lines.append(f"{name} - {products}" if name else products)
-            # 실제 Word에서는 상품 단위로 자동 줄바꿈되고, 다음 줄은 상품 시작 위치에 맞춰 들여쓰기됩니다.
+                name = str(r.get("수취인", "") or "")
+                products = str(r.get("상품목록", "") or "")
+                qty = _normalize_count(r.get("송장수량", 1))
+                qty_prefix = f"{_superscript_number(qty)} " if qty > 1 else ""
+                word_preview_lines.append(f"{qty_prefix}{name} - {products}" if name else f"{qty_prefix}{products}")
             st.text("\n\n".join(word_preview_lines))
 
     st.markdown("---")
@@ -3134,7 +3211,9 @@ def render_reship_page():
                 receiver = _limit_tc_name_20(r.get("수취인", ""))
                 memo = _clean_access_message(r.get("배송메모", ""))[:100]
                 addr = str(r.get("주소", "") or "").strip()
-                tc_rows.append({
+                shipment_count = _normalize_count(r.get("송장수량", 1))
+
+                base_tc_row = {
                     "판매처주문번호": "",
                     "상품명": TC_PRODUCT_NAME_FIXED,
                     "배송예정일": req_day_str,
@@ -3152,11 +3231,14 @@ def render_reship_page():
                     "출입방법": TC_ENTRY_METHOD_FIXED,
                     "출입방법상세설명": memo,
                     "배송메세지": memo,
-                })
+                }
+                for _ in range(shipment_count):
+                    tc_rows.append(base_tc_row.copy())
 
             try:
                 template_bytes = TC_TEMPLATE_DEFAULT_PATH.read_bytes()
                 st.session_state["reship_generated_excel"] = build_tc_excel_bytes(template_bytes, tc_rows)
+                # Word에는 각 재배송 건을 한 번만 적고, 송장수량은 이름 왼쪽 위의 작은 숫자로 표시합니다.
                 st.session_state["reship_generated_word"] = build_reship_docx(final_entries)
                 st.success("재배송송장.xlsx와 재배송건.docx를 생성했습니다.")
             except Exception as e:

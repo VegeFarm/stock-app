@@ -514,6 +514,8 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
     - 첫 줄: 이름 - 상품...
     - 다음 줄: 상품 시작 위치에 맞춰 들여쓰기
     - 수취인 사이: 빈 줄 1줄
+    - 송장수량이 2 이상이면 이름 왼쪽 위에 작은 위첨자 숫자 표시
+      (상품 문구는 한 번만 표시)
     """
     doc = Document()
     section = doc.sections[0]
@@ -544,8 +546,17 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
     for idx, entry in enumerate(clean_entries):
         name = str(entry.get("수취인", "") or "").strip()
         products = str(entry.get("상품목록", "") or "").strip()
+        try:
+            shipment_count = max(1, int(float(str(entry.get("송장수량", 1) or 1).strip())))
+        except Exception:
+            shipment_count = 1
+
         prefix = f"{name} - " if name else ""
-        indent_pt = min(_prefix_width_pt(prefix, 14), column_width_pt * 0.55)
+        # 송장수량이 2 이상이면 이름 왼쪽 위에 작은 숫자를 표시합니다.
+        # 둘째 줄의 상품 시작 위치는 이 숫자까지 포함한 첫 줄의 상품 시작점에 맞춥니다.
+        count_prefix = f"{shipment_count} " if shipment_count > 1 else ""
+        indent_basis = count_prefix + prefix
+        indent_pt = min(_prefix_width_pt(indent_basis, 14), column_width_pt * 0.55)
         product_area_pt = max(60.0, column_width_pt - indent_pt - 3.0)
         product_lines = _wrap_products(products, product_area_pt, 14)
 
@@ -557,6 +568,13 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
         pf.space_after = Pt(0)
         pf.line_spacing = 1.0
         pf.keep_together = True
+
+        if shipment_count > 1:
+            count_run = p.add_run(str(shipment_count))
+            _set_run_font(count_run, font_size=8)
+            count_run.font.superscript = True
+            spacer_run = p.add_run(" ")
+            _set_run_font(spacer_run)
 
         r = p.add_run(prefix)
         _set_run_font(r)
