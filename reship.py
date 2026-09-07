@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import re
-from difflib import SequenceMatcher
 from typing import Dict, Iterable, List, Optional
 
 from docx import Document
@@ -12,19 +11,9 @@ from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 
 
-# 재배송 입력에서 자주 쓰는 축약어만 내부적으로 보정합니다.
-# 별도 설정 화면은 만들지 않고, 기존 상품명 매칭 규칙을 우선 사용합니다.
-_BUILTIN_ALIASES = {
-    "방토": "방울토마토",
-    "방울토마토": "방울토마토",
-    "와일드루꼴라": "와일드",
-    "와일드루콜라": "와일드",
-    "와일드": "와일드",
-    "루꼴라": "로케트",
-    "루콜라": "로케트",
-    "로켓": "로케트",
-    "그린빈": "그린빈스",
-}
+# 재배송 상품명은 사용자가 입력한 표현을 그대로 유지합니다.
+# 축약어 치환, 기존 상품명 매칭, 유사도 보정, k→kg 등의 규격 보정을 하지 않습니다.
+# 단, 상품 뒤의 수량 표현은 상품 범위에 포함하여 배송메모로 빠지지 않게 합니다.
 
 _PHONE_RE = re.compile(r"(?<!\d)(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})(?!\d)")
 
@@ -102,98 +91,6 @@ def _normalize_phone(m: re.Match) -> str:
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
 
 
-def _normalize_spec(spec: str) -> str:
-    s = _compact(spec)
-    s = s.replace("킬로", "kg").replace("키로", "kg")
-    s = s.replace("그램", "g")
-    if re.fullmatch(r"\d+(?:\.\d+)?k", s, re.IGNORECASE):
-        s = s[:-1] + "kg"
-    s = re.sub(r"kg$", "kg", s, flags=re.IGNORECASE)
-    s = re.sub(r"g$", "g", s, flags=re.IGNORECASE)
-    return s
-
-
-def _canonical_from_rules(name: str, mapping_rules: Iterable[Dict]) -> Optional[str]:
-    raw = str(name or "").strip()
-    raw_compact = _compact(raw)
-    if not raw_compact:
-        return None
-
-    # 1) 기존 상품명 매칭 규칙을 우선 사용
-    for rule in mapping_rules or []:
-        if not rule.get("enabled", True):
-            continue
-        pattern = str(rule.get("pattern", "") or "").strip()
-        display = str(rule.get("display_name", "") or "").strip()
-        if not pattern or not display:
-            continue
-        mt = str(rule.get("match_type", "contains") or "contains").strip().lower()
-        matched = False
-        if mt == "exact":
-            matched = _compact(pattern) == raw_compact
-        elif mt == "regex":
-            try:
-                matched = bool(re.search(pattern, raw))
-            except re.error:
-                matched = False
-        else:
-            p = _compact(pattern)
-            matched = bool(p and (p in raw_compact or raw_compact in p))
-        if matched:
-            return display
-
-    # 2) 자주 쓰는 축약어
-    if raw_compact in _BUILTIN_ALIASES:
-        return _BUILTIN_ALIASES[raw_compact]
-
-    # 3) 기존 규칙의 표시명/패턴과 유사도 비교
-    candidates: List[str] = []
-    for rule in mapping_rules or []:
-        for key in ("display_name", "pattern"):
-            v = str(rule.get(key, "") or "").strip()
-            # 쇼핑몰 상품명 전체보다 짧은 실제 제품명 후보를 우선
-            if v and len(_compact(v)) <= 16:
-                candidates.append(v)
-    candidates.extend(_BUILTIN_ALIASES.values())
-
-    best = None
-    best_score = 0.0
-    for cand in candidates:
-        c = _compact(cand)
-        if not c:
-            continue
-        score = SequenceMatcher(None, raw_compact, c).ratio()
-        if score > best_score:
-            best_score = score
-            best = cand
-    if best is not None and best_score >= 0.78:
-        return best
-
-    return raw
-
-
-def _normalize_trailing_qty(m: Optional[re.Match]) -> str:
-    if m is None:
-        return ""
-
-    if m.group("num"):
-        unit = str(m.group("unit") or "").lower()
-        if unit == "ea":
-            unit = "개"
-        return f"{int(m.group('num'))}{unit}"
-
-    if m.group("multnum"):
-        # x2 / X 2 / ×2 / *2 는 '2개'로 통일
-        return f"{int(m.group('multnum'))}개"
-
-    if m.group("korean"):
-        n = _KOREAN_QTY_NUMBERS.get(str(m.group("korean")), 0)
-        unit = str(m.group("kunit") or "개")
-        return f"{n}{unit}" if n else ""
-
-    return ""
-
-
 def _iter_product_matches(text: str):
     """상품 규격과 바로 뒤의 별도 주문수량까지 한 묶음으로 반환합니다."""
     for m in _PRODUCT_RE.finditer(text):
@@ -205,26 +102,30 @@ def _iter_product_matches(text: str):
 
 
 def _extract_products(text: str, mapping_rules: Iterable[Dict]) -> tuple[List[str], str]:
+    """상품 문구를 입력된 그대로 추출합니다.
+
+    mapping_rules 인자는 기존 호출부 호환성을 위해 유지하지만 상품명 변환에는 사용하지 않습니다.
+    예:
+      - 방토3팩 -> 방토3팩
+      - 통로2k -> 통로2k
+      - 통로메인2k 2개 -> 통로메인2k 2개
+      - 와일드500g x2 -> 와일드500g x2
+      - 바질1kg 두개 -> 바질1kg 두개
+    """
     products: List[str] = []
     spans = []
     last_end = -1
 
-    for m, qty_match, full_span in _iter_product_matches(text):
+    for _m, _qty_match, full_span in _iter_product_matches(text):
         start, full_end = full_span
         if start < last_end:
             continue
 
-        name = m.group("name")
-        spec = m.group("spec")
-        canonical = _canonical_from_rules(name, mapping_rules) or name
-        product = f"{canonical}{_normalize_spec(spec)}"
-
-        trailing_qty = _normalize_trailing_qty(qty_match)
-        if trailing_qty:
-            product = f"{product} {trailing_qty}"
-
-        if product not in products:
+        # 상품명/규격/수량 표현을 변환하지 않고 입력된 문자열 그대로 사용합니다.
+        product = text[start:full_end].strip()
+        if product and product not in products:
             products.append(product)
+
         spans.append((start, full_end))
         last_end = full_end
 
@@ -430,7 +331,7 @@ def _split_blocks(raw_text: str) -> List[str]:
 
 
 def parse_reship_text(raw_text: str, mapping_rules: Optional[Iterable[Dict]] = None) -> List[Dict[str, str]]:
-    """자유형 재배송 메모를 수취인/연락처/주소/배송메모/상품목록으로 변환합니다."""
+    """자유형 재배송 메모를 항목별로 분리합니다. 상품 문구는 입력값 그대로 유지합니다."""
     rules = list(mapping_rules or [])
     results: List[Dict[str, str]] = []
 
