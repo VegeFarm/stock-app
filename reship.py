@@ -467,6 +467,37 @@ def _set_run_font(run, font_name: str = "맑은 고딕", font_size: int = 14) ->
     rfonts.set(qn("w:eastAsia"), font_name)
 
 
+def _disable_word_auto_spacing(paragraph) -> None:
+    """
+    Word가 숫자/영문과 한글 사이에 자동으로 간격을 넣지 않도록 설정합니다.
+    예: ``2개``가 Word 화면에서 ``2 개``처럼 보이는 현상을 방지합니다.
+    - autoSpaceDN: 숫자(Digit) ↔ 동아시아 문자 간 자동 간격 해제
+    - autoSpaceDE: 영문(Latin) ↔ 동아시아 문자 간 자동 간격 해제
+    """
+    ppr = paragraph._p.get_or_add_pPr()
+    for tag in ("w:autoSpaceDN", "w:autoSpaceDE"):
+        el = ppr.find(qn(tag))
+        if el is None:
+            el = OxmlElement(tag)
+            ppr.append(el)
+        el.set(qn("w:val"), "0")
+
+
+def _disable_style_auto_spacing(style) -> None:
+    """Word 스타일에도 숫자/영문 ↔ 한글 자동 간격 해제를 등록합니다."""
+    style_el = style._element
+    ppr = style_el.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = OxmlElement("w:pPr")
+        style_el.append(ppr)
+    for tag in ("w:autoSpaceDN", "w:autoSpaceDE"):
+        el = ppr.find(qn(tag))
+        if el is None:
+            el = OxmlElement(tag)
+            ppr.append(el)
+        el.set(qn("w:val"), "0")
+
+
 def _prefix_width_pt(prefix: str, font_size: int = 14) -> float:
     # 14pt 한글은 대략 1em, 영문/숫자는 약 0.55em으로 계산합니다.
     units = 0.0
@@ -545,6 +576,8 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
     normal.font.name = "맑은 고딕"
     normal.font.size = Pt(14)
     normal._element.rPr.rFonts.set(qn("w:eastAsia"), "맑은 고딕")
+    # Normal 스타일 자체에도 자동 문자 간격 해제를 등록합니다.
+    _disable_style_auto_spacing(normal)
 
     # A4 210mm - 좌우 25.4mm - 단 사이 12.7mm => 한 단 약 85.95mm
     column_width_pt = (85.95 / 25.4) * 72.0
@@ -574,6 +607,7 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
         product_lines = _wrap_products(products, product_area_pt, 14)
 
         p = doc.add_paragraph()
+        _disable_word_auto_spacing(p)
         pf = p.paragraph_format
         pf.left_indent = Pt(indent_pt)
         pf.first_line_indent = Pt(-indent_pt)
@@ -603,6 +637,7 @@ def build_reship_docx(entries: List[Dict[str, str]]) -> bytes:
         # 다른 수취인 재배송건은 한 칸(빈 줄 1줄) 띄움
         if idx < len(clean_entries) - 1:
             blank = doc.add_paragraph()
+            _disable_word_auto_spacing(blank)
             blank.paragraph_format.space_before = Pt(0)
             blank.paragraph_format.space_after = Pt(0)
             blank.paragraph_format.line_spacing = 1.0
