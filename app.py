@@ -2952,7 +2952,7 @@ def render_excel_results_page():
 
 def render_reship_page():
     st.title("🔁 재배송")
-    st.caption("재배송 정보를 자유롭게 붙여넣으면 수취인·연락처·주소·배송메모·상품을 자동 인식합니다.")
+    st.caption("재배송 정보를 자유롭게 붙여넣고 '반영'을 누르면 수취인·연락처·주소·배송메모·상품을 분석합니다.")
 
     today_kst = datetime.now(KST_TZ).date()
     req_day = today_kst + timedelta(days=1)
@@ -2961,8 +2961,33 @@ def render_reship_page():
     st.info(f"배송예정일은 생성일의 다음날로 자동 입력됩니다.  ·  배송예정일: {req_day_str}  ·  배송유형: 자동")
 
     mapping_rules = load_mapping_rules()
+    columns = ["수취인", "연락처", "주소", "배송메모", "상품목록"]
+
+    def _normalize_reship_df(data) -> pd.DataFrame:
+        if data is None:
+            out = pd.DataFrame(columns=columns)
+        elif isinstance(data, pd.DataFrame):
+            out = data.copy()
+        else:
+            out = pd.DataFrame(data)
+        for c in columns:
+            if c not in out.columns:
+                out[c] = ""
+        out = out[columns].fillna("")
+        for c in columns:
+            out[c] = out[c].astype(str).str.strip()
+        if len(out):
+            out = out[
+                out.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
+            ].reset_index(drop=True)
+        return out
+
+    def _clear_reship_generated() -> None:
+        st.session_state.pop("reship_generated_excel", None)
+        st.session_state.pop("reship_generated_word", None)
 
     left, right = st.columns([1, 1], gap="large")
+
     with left:
         st.subheader("1. 재배송 정보 붙여넣기")
         raw_text = st.text_area(
@@ -2972,36 +2997,45 @@ def render_reship_page():
             label_visibility="collapsed",
             placeholder=(
                 "예)\n"
-                "백혜주 010-9485-6496\n"
-                "서울특별시 마포구 신촌로 260-1 (아현동) 1층 타호커피\n"
-                "와일드1k, 바질500g, 방토3팩\n"
-                "문 앞에 놔주세요\n"
-                "화요일 재배송"
+                "수취인명 채소팜\n"
+                "연락처1 010-9515-4742\n"
+                "배송지 서울특별시 송파구 삼전로4길 3 채소팜\n"
+                "와일드1k, 바질500g, 방토3팩 재배송"
             ),
         )
 
-    raw_hash = hashlib.sha1((raw_text or "").encode("utf-8")).hexdigest()
-    if st.session_state.get("reship_source_hash") != raw_hash:
-        parsed_rows = parse_reship_text(raw_text or "", mapping_rules=mapping_rules)
-        st.session_state["reship_rows"] = parsed_rows
-        st.session_state["reship_source_hash"] = raw_hash
-        st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
-        st.session_state.pop("reship_generated_excel", None)
-        st.session_state.pop("reship_generated_word", None)
+        # 원문은 붙여넣거나 수정하는 것만으로는 적용되지 않습니다.
+        # 반드시 사용자가 '반영'을 눌렀을 때만 분석 결과/파일 생성 데이터가 갱신됩니다.
+        if st.button("반영", use_container_width=True, key="reship_apply_raw_btn", type="secondary"):
+            if str(raw_text or "").strip():
+                parsed_rows = parse_reship_text(raw_text, mapping_rules=mapping_rules)
+                parsed_df = _normalize_reship_df(parsed_rows)
+                st.session_state["reship_rows"] = parsed_df.to_dict("records")
+                st.session_state["reship_editing"] = False
+                st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
+                _clear_reship_generated()
+                st.success("붙여넣은 내용이 반영되었습니다.")
+            else:
+                st.session_state["reship_rows"] = []
+                st.session_state["reship_editing"] = False
+                st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
+                _clear_reship_generated()
+                st.info("입력 내용이 비어 있어 재배송 분석 결과를 비웠습니다.")
 
-    rows = st.session_state.get("reship_rows", []) or []
-    columns = ["수취인", "연락처", "주소", "배송메모", "상품목록"]
-    result_df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+    committed_df = _normalize_reship_df(st.session_state.get("reship_rows", []))
+    effective_df = committed_df.copy()
 
     with right:
         st.subheader("2. 분석 결과 및 수정")
-        if result_df.empty:
-            st.caption("왼쪽에 재배송 정보를 붙여넣으면 이곳에 바로 표시됩니다.")
-            edited_df = result_df
-        else:
+
+        if committed_df.empty:
+            st.caption("왼쪽에 재배송 정보를 붙여넣고 '반영'을 누르면 이곳에 표시됩니다.")
+        elif st.session_state.get("reship_editing", False):
+            # '수정'을 누른 동안에는 직접 고친 값이 미리보기와 파일 생성에 즉시 사용됩니다.
+            # '수정 완료'를 누르면 해당 값이 확정 저장되고, '취소'하면 수정 전 값으로 돌아갑니다.
             editor_ver = int(st.session_state.get("reship_editor_version", 0))
             edited_df = st.data_editor(
-                result_df,
+                committed_df,
                 num_rows="dynamic",
                 hide_index=True,
                 use_container_width=True,
@@ -3014,41 +3048,34 @@ def render_reship_page():
                     "상품목록": st.column_config.TextColumn("상품목록", width="large"),
                 },
             )
+            effective_df = _normalize_reship_df(edited_df)
+            # 수정 중에는 기존에 만들어 둔 파일이 현재 화면 값과 달라질 수 있으므로 숨깁니다.
+            _clear_reship_generated()
 
-            # 자동 분석 결과를 직접 고친 뒤, 사용자가 '반영'을 눌렀을 때
-            # 미리보기와 파일 생성 데이터에 확정 반영합니다.
-            if st.button("반영", use_container_width=True, key="reship_apply_btn"):
-                apply_df = edited_df.copy() if isinstance(edited_df, pd.DataFrame) else pd.DataFrame(edited_df)
-                for c in columns:
-                    if c not in apply_df.columns:
-                        apply_df[c] = ""
-                apply_df = apply_df[columns].fillna("")
-                for c in columns:
-                    apply_df[c] = apply_df[c].astype(str).str.strip()
-                apply_df = apply_df[
-                    apply_df.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
-                ].reset_index(drop=True)
-                st.session_state["reship_rows"] = apply_df.to_dict("records")
-                st.session_state.pop("reship_generated_excel", None)
-                st.session_state.pop("reship_generated_word", None)
-                result_df = apply_df.copy()
-                st.success("수정 내용이 반영되었습니다.")
+            edit_c1, edit_c2 = st.columns(2)
+            with edit_c1:
+                if st.button("수정 완료", use_container_width=True, key="reship_edit_done_btn", type="secondary"):
+                    st.session_state["reship_rows"] = effective_df.to_dict("records")
+                    st.session_state["reship_editing"] = False
+                    st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
+                    _clear_reship_generated()
+                    st.rerun()
+            with edit_c2:
+                if st.button("취소", use_container_width=True, key="reship_edit_cancel_btn", type="secondary"):
+                    st.session_state["reship_editing"] = False
+                    st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
+                    _clear_reship_generated()
+                    st.rerun()
+        else:
+            st.dataframe(committed_df, hide_index=True, use_container_width=True)
+            if st.button("수정", use_container_width=True, key="reship_edit_btn", type="secondary"):
+                st.session_state["reship_editing"] = True
+                st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
+                _clear_reship_generated()
+                st.rerun()
 
-    # 미리보기와 파일 생성은 마지막으로 '반영'된 데이터만 사용합니다.
-    applied_df = result_df.copy()
-    if applied_df is None:
-        applied_df = pd.DataFrame(columns=columns)
-    if not isinstance(applied_df, pd.DataFrame):
-        applied_df = pd.DataFrame(applied_df)
-    for c in columns:
-        if c not in applied_df.columns:
-            applied_df[c] = ""
-    applied_df = applied_df[columns].copy().fillna("")
-    for c in columns:
-        applied_df[c] = applied_df[c].astype(str).str.strip()
-    applied_df = applied_df[
-        applied_df.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
-    ].reset_index(drop=True)
+    # 파일 미리보기와 생성은 반영된 값 또는 현재 '수정' 중인 값을 사용합니다.
+    applied_df = _normalize_reship_df(effective_df)
 
     if len(applied_df):
         st.markdown("---")
@@ -3096,6 +3123,7 @@ def render_reship_page():
         use_container_width=True,
         disabled=generate_disabled,
         key="reship_generate_btn",
+        type="secondary",
     ):
         if not TC_TEMPLATE_DEFAULT_PATH.exists():
             st.error("앱 폴더에 '컬리주문_등록양식.xlsx' 파일이 없습니다.")

@@ -51,7 +51,7 @@ _LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _DATE_NOISE_RE = re.compile(
-    r"(?:월|화|수|목|금|토|일)요일|(?:오늘|내일|모레)|\d{1,2}[./-]\d{1,2}(?:[./-]\d{1,2})?|재배송",
+    r"(?:월|화|수|목|금|토|일)\s*요일|(?:오늘|내일|모레)|\d{1,2}[./-]\d{1,2}(?:[./-]\d{1,2})?|재배송",
     re.IGNORECASE,
 )
 _MEMO_HINT_RE = re.compile(
@@ -299,6 +299,9 @@ def _cleanup_leftover(text: str) -> str:
     s = _LABEL_RE.sub(" ", text)
     s = _DATE_NOISE_RE.sub(" ", s)
     s = s.replace("<<PRODUCT>>", " ")
+    # 복사/붙여넣기 과정에서 요일 주위에 붙는 반복 따옴표를 배송메모로 남기지 않습니다.
+    # 예: 재배송 """"월요일"""" -> 재배송/요일/따옴표 모두 제거
+    s = re.sub(r'["“”\'‘’]+', " ", s)
     s = re.sub(r"[,;/|]+", " ", s)
     s = re.sub(r"\s+", " ", s)
     return s.strip(" -:/")
