@@ -28,11 +28,28 @@ _BUILTIN_ALIASES = {
 
 _PHONE_RE = re.compile(r"(?<!\d)(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})(?!\d)")
 
-# 상품명 + 규격/수량. 예: 방토3팩, 바질500g, 와일드1k, 고수 1단
+# 상품명 + 규격. 예: 방토3팩, 바질500g, 와일드1k, 고수1단
 _PRODUCT_RE = re.compile(
     r"(?P<name>[A-Za-z가-힣][A-Za-z가-힣·ㆍ_-]{0,30})\s*"
     r"(?P<spec>\d+(?:\.\d+)?\s*(?:kg|KG|Kg|k|K|키로|킬로|g|G|그램|팩|개|통|단|봉|박스))"
 )
+
+# 상품 규격 뒤에 별도로 붙는 주문 수량.
+# 예: 통로메인2k 2개 / 바질500g 3개 / 엔다이브1kg 2봉 / 와일드500g x2
+# 이 부분은 배송메모가 아니라 바로 앞 상품에 묶어서 처리합니다.
+_TRAILING_QTY_RE = re.compile(
+    r"\s*(?:"
+    r"(?P<num>\d+)\s*(?P<unit>개|팩|단|통|봉|박스|세트|망|ea)"
+    r"|(?P<mult>[xX×*])\s*(?P<multnum>\d+)"
+    r"|(?P<korean>한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*(?P<kunit>개|팩|단|통|봉|박스|세트|망)"
+    r")",
+    re.IGNORECASE,
+)
+
+_KOREAN_QTY_NUMBERS = {
+    "한": 1, "두": 2, "세": 3, "네": 4, "다섯": 5,
+    "여섯": 6, "일곱": 7, "여덟": 8, "아홉": 9, "열": 10,
+}
 
 _ADDRESS_START_RE = re.compile(
     r"(?:서울(?:특별시)?|부산(?:광역시)?|대구(?:광역시)?|인천(?:광역시)?|광주(?:광역시)?|"
@@ -155,17 +172,61 @@ def _canonical_from_rules(name: str, mapping_rules: Iterable[Dict]) -> Optional[
     return raw
 
 
+def _normalize_trailing_qty(m: Optional[re.Match]) -> str:
+    if m is None:
+        return ""
+
+    if m.group("num"):
+        unit = str(m.group("unit") or "").lower()
+        if unit == "ea":
+            unit = "개"
+        return f"{int(m.group('num'))}{unit}"
+
+    if m.group("multnum"):
+        # x2 / X 2 / ×2 / *2 는 '2개'로 통일
+        return f"{int(m.group('multnum'))}개"
+
+    if m.group("korean"):
+        n = _KOREAN_QTY_NUMBERS.get(str(m.group("korean")), 0)
+        unit = str(m.group("kunit") or "개")
+        return f"{n}{unit}" if n else ""
+
+    return ""
+
+
+def _iter_product_matches(text: str):
+    """상품 규격과 바로 뒤의 별도 주문수량까지 한 묶음으로 반환합니다."""
+    for m in _PRODUCT_RE.finditer(text):
+        # 앞선 상품의 trailing quantity 안에서 다시 상품으로 오인식되는 경우 방지
+        start, end = m.span()
+        qty_match = _TRAILING_QTY_RE.match(text, end)
+        full_end = qty_match.end() if qty_match else end
+        yield m, qty_match, (start, full_end)
+
+
 def _extract_products(text: str, mapping_rules: Iterable[Dict]) -> tuple[List[str], str]:
     products: List[str] = []
     spans = []
-    for m in _PRODUCT_RE.finditer(text):
+    last_end = -1
+
+    for m, qty_match, full_span in _iter_product_matches(text):
+        start, full_end = full_span
+        if start < last_end:
+            continue
+
         name = m.group("name")
         spec = m.group("spec")
         canonical = _canonical_from_rules(name, mapping_rules) or name
         product = f"{canonical}{_normalize_spec(spec)}"
+
+        trailing_qty = _normalize_trailing_qty(qty_match)
+        if trailing_qty:
+            product = f"{product} {trailing_qty}"
+
         if product not in products:
             products.append(product)
-        spans.append(m.span())
+        spans.append((start, full_end))
+        last_end = full_end
 
     if not spans:
         return products, text
@@ -387,8 +448,11 @@ def parse_reship_text(raw_text: str, mapping_rules: Optional[Iterable[Dict]] = N
         products, block = _extract_products(block, rules)
         # 주소 추출의 경계를 잡기 위해 상품 자리에 마커를 넣은 원문도 별도로 사용
         marked = original
-        for m in reversed(list(_PRODUCT_RE.finditer(marked))):
-            marked = marked[: m.start()] + " <<PRODUCT>> " + marked[m.end() :]
+        # 주소/메모 분리용 원문에서도 상품 뒤 수량까지 함께 제거합니다.
+        # 그래야 '통로메인2k 2개'의 '2개'가 배송메모로 남지 않습니다.
+        product_spans = [full_span for _, _, full_span in _iter_product_matches(marked)]
+        for start, end in reversed(product_spans):
+            marked = marked[:start] + " <<PRODUCT>> " + marked[end:]
         marked = _PHONE_RE.sub(" ", marked)
 
         address, marked_remaining = _extract_address(marked)
