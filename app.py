@@ -3081,9 +3081,9 @@ def render_reship_page():
                         width=55,
                         help="엑셀에 생성할 동일 송장 행 수입니다. 숫자를 직접 수정한 뒤 아래 '수정'을 누르면 반영됩니다.",
                     ),
-                    "수취인": st.column_config.TextColumn("수취인명", width="small"),
+                    "수취인": st.column_config.TextColumn("수취인명", width=105),
                     # 연락처는 010-0000-0000 한 줄이 들어가는 정도로만 사용합니다.
-                    "연락처": st.column_config.TextColumn("연락처", width=140),
+                    "연락처": st.column_config.TextColumn("연락처", width=120),
                     # 주소 열은 기존 크기를 유지합니다.
                     "주소": st.column_config.TextColumn("주소", width="large"),
                     # 주소 오른쪽에는 상품, 마지막에는 배송메모를 배치합니다.

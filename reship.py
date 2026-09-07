@@ -181,6 +181,13 @@ def _extract_address(text: str) -> tuple[str, str]:
     def _clean_address_label(value: str) -> str:
         # 주소 결과에는 '배송지', '주소', '배송지 주소' 같은 라벨을 남기지 않습니다.
         value = re.sub(r"^\s*(?:배송지\s*주소|배송지|주소)\s*[:：-]?\s*", "", value, flags=re.IGNORECASE)
+
+        # 네이버 등에서 복사할 때 주소 맨 앞에 붙는 우편번호는 재배송 주소에 넣지 않습니다.
+        # 예: (38078) 경상북도 ... -> 경상북도 ...
+        #     우편번호 38078 경상북도 ... -> 경상북도 ...
+        value = re.sub(r"^\s*우편번호\s*[:：-]?\s*\d{5}\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"^\s*[\(（\[]\s*\d{5}\s*[\)）\]]\s*", "", value)
+
         return re.sub(r"\s+", " ", value).strip(" ,;/")
 
     def _is_address_boundary(line: str) -> bool:
