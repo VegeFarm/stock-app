@@ -114,6 +114,7 @@ from drive_utils import save_excel_upload_to_drive_once
 from sales import render_sales_calc_page
 from invoice import render_invoice_register_page
 from stock import render_bulk_stock_page
+from reship import parse_reship_text, build_reship_docx
 
 
 # -------------------- Atomic write helpers --------------------
@@ -2392,6 +2393,9 @@ with st.sidebar:
     if st.button("🚚 송장등록", use_container_width=True):
         st.session_state["page"] = "invoice_register"
         st.rerun()
+    if st.button("🔁 재배송", use_container_width=True):
+        st.session_state["page"] = "reship"
+        st.rerun()
     if st.button("🧰 재고일괄변경", use_container_width=True):
         st.session_state["page"] = "bulk_stock"
         st.rerun()
@@ -2945,6 +2949,198 @@ def render_excel_results_page():
                 )
 
 
+
+def render_reship_page():
+    st.title("🔁 재배송")
+    st.caption("재배송 정보를 자유롭게 붙여넣으면 수취인·연락처·주소·배송메모·상품을 자동 인식합니다.")
+
+    today_kst = datetime.now(KST_TZ).date()
+    req_day = today_kst + timedelta(days=1)
+    req_day_str = req_day.strftime("%Y-%m-%d")
+
+    st.info(f"배송예정일은 생성일의 다음날로 자동 입력됩니다.  ·  배송예정일: {req_day_str}  ·  배송유형: 자동")
+
+    mapping_rules = load_mapping_rules()
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        st.subheader("1. 재배송 정보 붙여넣기")
+        raw_text = st.text_area(
+            "재배송 정보",
+            key="reship_raw_text",
+            height=370,
+            label_visibility="collapsed",
+            placeholder=(
+                "예)\n"
+                "백혜주 010-9485-6496\n"
+                "서울특별시 마포구 신촌로 260-1 (아현동) 1층 타호커피\n"
+                "와일드1k, 바질500g, 방토3팩\n"
+                "문 앞에 놔주세요\n"
+                "화요일 재배송"
+            ),
+        )
+
+    raw_hash = hashlib.sha1((raw_text or "").encode("utf-8")).hexdigest()
+    if st.session_state.get("reship_source_hash") != raw_hash:
+        parsed_rows = parse_reship_text(raw_text or "", mapping_rules=mapping_rules)
+        st.session_state["reship_rows"] = parsed_rows
+        st.session_state["reship_source_hash"] = raw_hash
+        st.session_state["reship_editor_version"] = int(st.session_state.get("reship_editor_version", 0)) + 1
+        st.session_state.pop("reship_generated_excel", None)
+        st.session_state.pop("reship_generated_word", None)
+
+    rows = st.session_state.get("reship_rows", []) or []
+    columns = ["수취인", "연락처", "주소", "배송메모", "상품목록"]
+    result_df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+
+    with right:
+        st.subheader("2. 분석 결과 및 수정")
+        if result_df.empty:
+            st.caption("왼쪽에 재배송 정보를 붙여넣으면 이곳에 바로 표시됩니다.")
+            edited_df = result_df
+        else:
+            editor_ver = int(st.session_state.get("reship_editor_version", 0))
+            edited_df = st.data_editor(
+                result_df,
+                num_rows="dynamic",
+                hide_index=True,
+                use_container_width=True,
+                key=f"reship_editor_{editor_ver}",
+                column_config={
+                    "수취인": st.column_config.TextColumn("수취인", width="small"),
+                    "연락처": st.column_config.TextColumn("연락처", width="medium"),
+                    "주소": st.column_config.TextColumn("주소", width="large"),
+                    "배송메모": st.column_config.TextColumn("배송메모", width="large"),
+                    "상품목록": st.column_config.TextColumn("상품목록", width="large"),
+                },
+            )
+
+    if edited_df is None:
+        edited_df = pd.DataFrame(columns=columns)
+    if not isinstance(edited_df, pd.DataFrame):
+        edited_df = pd.DataFrame(edited_df)
+    for c in columns:
+        if c not in edited_df.columns:
+            edited_df[c] = ""
+    edited_df = edited_df[columns].copy()
+    edited_df = edited_df.fillna("")
+    for c in columns:
+        edited_df[c] = edited_df[c].astype(str).str.strip()
+    edited_df = edited_df[
+        edited_df.apply(lambda r: any(str(r.get(c, "")).strip() for c in columns), axis=1)
+    ].reset_index(drop=True)
+
+    if len(edited_df):
+        st.markdown("---")
+        p1, p2 = st.columns(2, gap="large")
+
+        with p1:
+            st.subheader("엑셀 미리보기 · 재배송송장.xlsx")
+            excel_preview = pd.DataFrame({
+                "상품명": [TC_PRODUCT_NAME_FIXED] * len(edited_df),
+                "배송예정일": [req_day_str] * len(edited_df),
+                "배송유형": ["자동"] * len(edited_df),
+                "수취인": edited_df["수취인"].tolist(),
+                "연락처": edited_df["연락처"].tolist(),
+                "주소": edited_df["주소"].tolist(),
+                "배송메모": edited_df["배송메모"].tolist(),
+            })
+            st.dataframe(excel_preview, hide_index=True, use_container_width=True)
+            st.caption("화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
+
+        with p2:
+            st.subheader("Word 미리보기 · 재배송건.docx")
+            st.caption("여백: 좁게 · 2단 · 글자크기 14pt · 둘째 줄부터 상품 시작 위치에 맞춤")
+            word_preview_lines = []
+            for _, r in edited_df.iterrows():
+                name = r["수취인"]
+                products = r["상품목록"]
+                word_preview_lines.append(f"{name} - {products}" if name else products)
+            # 실제 Word에서는 상품 단위로 자동 줄바꿈되고, 다음 줄은 상품 시작 위치에 맞춰 들여쓰기됩니다.
+            st.text("\n\n".join(word_preview_lines))
+
+    st.markdown("---")
+    required_missing = []
+    if len(edited_df):
+        for idx, r in edited_df.iterrows():
+            missing = [c for c in ("수취인", "연락처", "주소") if not str(r[c]).strip()]
+            if missing:
+                required_missing.append(f"{idx + 1}번: {', '.join(missing)}")
+
+    if required_missing:
+        st.warning("파일 생성 전에 확인이 필요한 항목이 있습니다. " + " / ".join(required_missing))
+
+    generate_disabled = (len(edited_df) == 0) or bool(required_missing)
+    if st.button(
+        "📄 재배송 파일 생성하기 (엑셀 + Word)",
+        type="primary",
+        use_container_width=True,
+        disabled=generate_disabled,
+        key="reship_generate_btn",
+    ):
+        if not TC_TEMPLATE_DEFAULT_PATH.exists():
+            st.error("앱 폴더에 '컬리주문_등록양식.xlsx' 파일이 없습니다.")
+        else:
+            final_entries = edited_df.to_dict("records")
+            tc_rows = []
+            for r in final_entries:
+                receiver = _limit_tc_name_20(r.get("수취인", ""))
+                memo = _clean_access_message(r.get("배송메모", ""))[:100]
+                addr = str(r.get("주소", "") or "").strip()
+                tc_rows.append({
+                    "판매처주문번호": "",
+                    "상품명": TC_PRODUCT_NAME_FIXED,
+                    "배송예정일": req_day_str,
+                    "배송요청일": req_day_str,
+                    "배송유형": "자동",
+                    "그룹배송구분": "자동",
+                    "주문자": receiver,
+                    "수령자": receiver,
+                    "수령자연락처": str(r.get("연락처", "") or "").strip(),
+                    "수령자도로명주소": addr,
+                    "도로명기본주소": addr,
+                    "상세주소": "",
+                    "상품수령장소": TC_RECEIVE_PLACE_FIXED,
+                    "상품수령장소상세설명": "",
+                    "출입방법": TC_ENTRY_METHOD_FIXED,
+                    "출입방법상세설명": memo,
+                    "배송메세지": memo,
+                })
+
+            try:
+                template_bytes = TC_TEMPLATE_DEFAULT_PATH.read_bytes()
+                st.session_state["reship_generated_excel"] = build_tc_excel_bytes(template_bytes, tc_rows)
+                st.session_state["reship_generated_word"] = build_reship_docx(final_entries)
+                st.success("재배송송장.xlsx와 재배송건.docx를 생성했습니다.")
+            except Exception as e:
+                st.error(f"재배송 파일 생성 실패: {e}")
+                st.exception(e)
+
+    excel_bytes = st.session_state.get("reship_generated_excel")
+    word_bytes = st.session_state.get("reship_generated_word")
+    if excel_bytes or word_bytes:
+        d1, d2 = st.columns(2)
+        with d1:
+            if excel_bytes:
+                st.download_button(
+                    "⬇️ 재배송송장.xlsx 다운로드",
+                    data=excel_bytes,
+                    file_name="재배송송장.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="reship_excel_download",
+                )
+        with d2:
+            if word_bytes:
+                st.download_button(
+                    "⬇️ 재배송건.docx 다운로드",
+                    data=word_bytes,
+                    file_name="재배송건.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True,
+                    key="reship_word_download",
+                )
+
 def render_product_totals_page():
     st.title("🧾 제품별 합계 (PACK/BOX/EA 규칙 적용)")
     st.caption("PDF 업로드 없이, 엑셀 결과(제품별 개수)를 기반으로 자동 계산합니다.")
@@ -3400,6 +3596,8 @@ elif page == "inventory":
     render_inventory_page()
 elif page == "invoice_register":
     render_invoice_register_page()
+elif page == "reship":
+    render_reship_page()
 elif page == "bulk_stock":
     render_bulk_stock_page()
 elif page == "sales_calc":
