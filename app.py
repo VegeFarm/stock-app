@@ -1473,10 +1473,12 @@ def build_reship_recipient_pdf(
 
     - 기존 새벽/익일 수취인별 PDF와 같은 기본 디자인(이름 - 상품, 구분선, 하단 페이지표기)
     - 한 페이지 12개 고정 슬롯
+    - 각 수취인 앞에 현재 종이의 슬롯 번호를 ``1. 이름`` 형태로 표시
     - start_position=1: 새 종이의 첫 칸부터 출력
-    - start_position=5: 1~4칸은 완전히 비우고 5번째 칸부터 출력
+    - start_position=5: 1~4칸은 완전히 비우고 5번째 칸부터 출력하며 첫 고객은 ``5. 이름``으로 표시
+    - 다음 페이지는 새 종이이므로 슬롯 번호가 다시 1부터 시작
     - 상품이 길면 슬롯 높이를 유지하기 위해 글자 크기를 12pt에서 최소 9pt까지 자동 축소
-    - 송장수량이 2 이상이면 이름 왼쪽에 연한 빨강 (2), (3) 형태로 표시
+    - 송장수량이 2 이상이면 해당 이름 바로 위에 연한 빨강 ``(2)``, ``(3)`` 형태로 표시
     """
     buf = io.BytesIO()
 
@@ -1546,11 +1548,17 @@ def build_reship_recipient_pdf(
         recv = str(e.get("수취인", "") or "").strip() or " "
         items = str(e.get("상품목록", "") or "").strip() or " "
         shipment_count = _count_value(e)
+        position_no = slot_index + 1
+        position_prefix = f"{position_no}. "
 
         y_top = A4[1] - top_margin - (slot_index * slot_h)
         y_bottom = y_top - slot_h
         separator_y = y_bottom + 4 * mm
-        max_text_h = slot_h - 8 * mm
+
+        # 송장수량 표시는 이름 바로 위 한 줄을 사용합니다.
+        # 수량 1인 건도 본문 위치를 동일하게 유지해, 추가 인쇄 시 모든 슬롯의 기준점이 같도록 합니다.
+        main_top = y_top - 5.0 * mm
+        max_text_h = max(12.0, main_top - separator_y - 1.5 * mm)
 
         # 고정 슬롯 안에 텍스트가 모두 들어오도록 필요 시 폰트를 조금 줄입니다.
         font_size = float(RECIPIENT_FONT_SIZE)
@@ -1558,10 +1566,9 @@ def build_reship_recipient_pdf(
         p_w = p_h = 0.0
         while font_size >= 9.0:
             leading = max(font_size + 3.0, font_size * 1.15)
-            qty_plain = f"({shipment_count}) " if shipment_count > 1 else ""
-            name_token_plain = f"{qty_plain}{recv} - "
+            name_token_plain = f"{position_prefix}{recv} - "
             indent = _text_width_pt(name_token_plain, font_name, font_size)
-            indent = min(max(indent, 40), usable_width * 0.60)
+            indent = min(max(indent, 40), usable_width * 0.65)
 
             style = ParagraphStyle(
                 f"reship_slot_{page_no}_{slot_index}_{int(font_size*10)}",
@@ -1574,19 +1581,29 @@ def build_reship_recipient_pdf(
                 spaceBefore=0,
             )
 
-            qty_html = (
-                f'<font color="{RESHIP_COUNT_COLOR_HEX}">({shipment_count})</font> '
-                if shipment_count > 1 else ""
-            )
-            text = f'{qty_html}<b>{_xml_escape(recv)}</b> - {_xml_escape(items)}'
+            text = f'{_xml_escape(position_prefix)}<b>{_xml_escape(recv)}</b> - {_xml_escape(items)}'
             p = Paragraph(text, style)
             p_w, p_h = p.wrap(usable_width, max_text_h)
             if p_h <= max_text_h + 0.1:
                 break
             font_size -= 0.5
 
+        # 송장수량이 2 이상일 때만 이름 바로 위에 연한 빨강 (N)을 표시합니다.
+        if shipment_count > 1:
+            count_font_size = 10.0
+            count_x = left_margin + _text_width_pt(position_prefix, font_name, font_size)
+            count_y = y_top - 3.6 * mm
+            c.saveState()
+            try:
+                c.setFont(font_name, count_font_size)
+            except Exception:
+                c.setFont("Helvetica", count_font_size)
+            c.setFillColor(colors.HexColor(RESHIP_COUNT_COLOR_HEX))
+            c.drawString(count_x, count_y, f"({shipment_count})")
+            c.restoreState()
+
         if p is not None:
-            p.drawOn(c, left_margin, y_top - p_h)
+            p.drawOn(c, left_margin, main_top - p_h)
 
         c.saveState()
         c.setStrokeColor(colors.lightgrey)
@@ -3331,7 +3348,7 @@ def render_reship_page():
 
         with p2:
             st.subheader("PDF 미리보기")
-            st.caption("기존 새벽/익일 수취인별 PDF와 같은 형태 · 한 페이지 12칸 고정 · 송장수량 2 이상은 이름 왼쪽에 연한 빨강 (2), (3) 표시")
+            st.caption("기존 새벽/익일 수취인별 PDF와 같은 형태 · 한 페이지 12칸 고정 · 1. 이름 형식으로 위치번호 표시 · 송장수량 2 이상은 이름 바로 위에 연한 빨강 (2), (3) 표시")
 
             if "reship_pdf_start_position" not in st.session_state:
                 st.session_state["reship_pdf_start_position"] = 1
@@ -3350,16 +3367,25 @@ def render_reship_page():
                 st.caption("새 종이에 출력할 때는 시작 위치 1을 사용합니다.")
 
             pdf_preview_lines = []
+            preview_slot_index = int(pdf_start_position) - 1
             for _, r in applied_df.iterrows():
+                if preview_slot_index >= RESHIP_RECIPIENT_SLOTS_PER_PAGE:
+                    preview_slot_index = 0
+                position_no = preview_slot_index + 1
                 name = html.escape(str(r.get("수취인", "") or ""))
                 products = html.escape(str(r.get("상품목록", "") or ""))
                 qty = _normalize_count(r.get("송장수량", 1))
-                qty_prefix = f'<span style="color:#D99A9A;">({qty})</span> ' if qty > 1 else ""
-                content = f"{qty_prefix}<b>{name}</b> - {products}" if name else f"{qty_prefix}{products}"
-                pdf_preview_lines.append(
-                    '<div style="padding:0.35rem 0 0.55rem 0; border-bottom:1px solid #e5e5e5;">'
-                    + content + '</div>'
+                qty_line = (
+                    f'<div style="color:#D99A9A; font-size:10pt; line-height:1.0; margin-left:1.35rem; margin-bottom:0.05rem;">({qty})</div>'
+                    if qty > 1 else
+                    '<div style="height:10pt; line-height:10pt; margin-bottom:0.05rem;">&nbsp;</div>'
                 )
+                content = f"{position_no}. <b>{name}</b> - {products}" if name else f"{position_no}. {products}"
+                pdf_preview_lines.append(
+                    '<div style="padding:0.2rem 0 0.45rem 0; border-bottom:1px solid #e5e5e5;">'
+                    + qty_line + content + '</div>'
+                )
+                preview_slot_index += 1
             st.markdown(
                 '<div style="font-size:12pt; line-height:1.3;">' + "".join(pdf_preview_lines) + "</div>",
                 unsafe_allow_html=True,
