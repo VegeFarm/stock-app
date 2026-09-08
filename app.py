@@ -3334,6 +3334,7 @@ def render_reship_page():
 
         with p1:
             st.subheader("엑셀 미리보기")
+            st.caption("송장수량만큼 같은 정보가 실제 엑셀 행으로 추가됩니다. 화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
             excel_preview = pd.DataFrame({
                 "상품명": [TC_PRODUCT_NAME_FIXED] * len(excel_applied_df),
                 "배송예정일": [req_day_str] * len(excel_applied_df),
@@ -3344,11 +3345,10 @@ def render_reship_page():
                 "배송메모": excel_applied_df["배송메모"].tolist(),
             })
             st.dataframe(excel_preview, hide_index=True, use_container_width=True)
-            st.caption("송장수량만큼 같은 정보가 실제 엑셀 행으로 추가됩니다. 화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
 
         with p2:
             st.subheader("PDF 미리보기")
-            st.caption("기존 새벽/익일 수취인별 PDF와 같은 형태 · 한 페이지 12칸 고정 · 1. 이름 형식으로 위치번호 표시 · 송장수량 2 이상은 이름 바로 위에 연한 빨강 (2), (3) 표시")
+            st.caption("한 페이지 12칸 고정. 송장수량 2 이상은 이름 바로 위에 연한 빨강 (숫자) 표시")
 
             if "reship_pdf_start_position" not in st.session_state:
                 st.session_state["reship_pdf_start_position"] = 1
