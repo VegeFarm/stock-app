@@ -115,7 +115,7 @@ from drive_utils import save_excel_upload_to_drive_once
 from sales import render_sales_calc_page
 from invoice import render_invoice_register_page
 from stock import render_bulk_stock_page
-from reship import parse_reship_text, build_reship_docx
+from reship import parse_reship_text
 
 
 # -------------------- Atomic write helpers --------------------
@@ -1453,6 +1453,152 @@ def build_recipient_pdf(entries: List[Dict[str, str]], footer_prefix: str = "") 
         elems.append(block)
 
     doc.build(elems, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
+    return buf.getvalue()
+
+
+# -------------------- PDF 2-1) 재배송 수취인별 출력 --------------------
+# 같은 종이에 이어 인쇄할 수 있도록 한 페이지를 고정 높이 슬롯으로 나눕니다.
+# 1차 출력과 추가 출력 모두 같은 슬롯 규칙을 사용해야 위치가 정확히 맞습니다.
+RESHIP_RECIPIENT_SLOT_H_MM = 22.0
+RESHIP_RECIPIENT_SLOTS_PER_PAGE = 12
+RESHIP_COUNT_COLOR_HEX = "#D99A9A"
+
+
+def build_reship_recipient_pdf(
+    entries: List[Dict[str, str]],
+    start_position: int = 1,
+    footer_prefix: str = "재배송",
+) -> bytes:
+    """재배송 수취인별 PDF를 생성합니다.
+
+    - 기존 새벽/익일 수취인별 PDF와 같은 기본 디자인(이름 - 상품, 구분선, 하단 페이지표기)
+    - 한 페이지 12개 고정 슬롯
+    - start_position=1: 새 종이의 첫 칸부터 출력
+    - start_position=5: 1~4칸은 완전히 비우고 5번째 칸부터 출력
+    - 상품이 길면 슬롯 높이를 유지하기 위해 글자 크기를 12pt에서 최소 9pt까지 자동 축소
+    - 송장수량이 2 이상이면 이름 왼쪽에 연한 빨강 (2), (3) 형태로 표시
+    """
+    buf = io.BytesIO()
+
+    font_name = "Helvetica"
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("HYGothic-Medium"))
+        font_name = "HYGothic-Medium"
+    except Exception:
+        pass
+
+    left_margin = 12 * mm
+    right_margin = 12 * mm
+    top_margin = 12 * mm
+    bottom_margin = 12 * mm
+    usable_width = A4[0] - left_margin - right_margin
+    slot_h = RESHIP_RECIPIENT_SLOT_H_MM * mm
+    slots_per_page = RESHIP_RECIPIENT_SLOTS_PER_PAGE
+
+    try:
+        start_position = int(start_position)
+    except Exception:
+        start_position = 1
+    start_position = min(max(start_position, 1), slots_per_page)
+
+    clean_entries = [
+        e for e in entries
+        if any(str(e.get(k, "") or "").strip() for k in ("수취인", "상품목록"))
+    ]
+
+    c = canvas.Canvas(buf, pagesize=A4)
+    page_no = 1
+    slot_index = start_position - 1
+
+    def _draw_footer(draw_on_first_extra_page: bool = True):
+        # 추가 인쇄(start_position>1)의 첫 페이지는 이미 인쇄된 종이에 다시 넣는 용도라
+        # 기존 하단 페이지 번호를 덧인쇄하지 않습니다.
+        if not footer_prefix:
+            return
+        if page_no == 1 and start_position > 1 and not draw_on_first_extra_page:
+            return
+        txt = f"{footer_prefix} -{page_no}-"
+        font_size = 11
+        try:
+            c.setFont(font_name, font_size)
+        except Exception:
+            c.setFont("Helvetica", font_size)
+        w = _text_width_pt(txt, font_name, font_size)
+        c.drawString((A4[0] - w) / 2.0, 6 * mm, txt)
+
+    def _new_page():
+        nonlocal page_no, slot_index
+        _draw_footer(draw_on_first_extra_page=False)
+        c.showPage()
+        page_no += 1
+        slot_index = 0
+
+    def _count_value(entry: Dict[str, str]) -> int:
+        try:
+            return max(1, int(float(str(entry.get("송장수량", 1) or 1).strip())))
+        except Exception:
+            return 1
+
+    for e in clean_entries:
+        if slot_index >= slots_per_page:
+            _new_page()
+
+        recv = str(e.get("수취인", "") or "").strip() or " "
+        items = str(e.get("상품목록", "") or "").strip() or " "
+        shipment_count = _count_value(e)
+
+        y_top = A4[1] - top_margin - (slot_index * slot_h)
+        y_bottom = y_top - slot_h
+        separator_y = y_bottom + 4 * mm
+        max_text_h = slot_h - 8 * mm
+
+        # 고정 슬롯 안에 텍스트가 모두 들어오도록 필요 시 폰트를 조금 줄입니다.
+        font_size = float(RECIPIENT_FONT_SIZE)
+        p = None
+        p_w = p_h = 0.0
+        while font_size >= 9.0:
+            leading = max(font_size + 3.0, font_size * 1.15)
+            qty_plain = f"({shipment_count}) " if shipment_count > 1 else ""
+            name_token_plain = f"{qty_plain}{recv} - "
+            indent = _text_width_pt(name_token_plain, font_name, font_size)
+            indent = min(max(indent, 40), usable_width * 0.60)
+
+            style = ParagraphStyle(
+                f"reship_slot_{page_no}_{slot_index}_{int(font_size*10)}",
+                fontName=font_name,
+                fontSize=font_size,
+                leading=leading,
+                leftIndent=indent,
+                firstLineIndent=-indent,
+                spaceAfter=0,
+                spaceBefore=0,
+            )
+
+            qty_html = (
+                f'<font color="{RESHIP_COUNT_COLOR_HEX}">({shipment_count})</font> '
+                if shipment_count > 1 else ""
+            )
+            text = f'{qty_html}<b>{_xml_escape(recv)}</b> - {_xml_escape(items)}'
+            p = Paragraph(text, style)
+            p_w, p_h = p.wrap(usable_width, max_text_h)
+            if p_h <= max_text_h + 0.1:
+                break
+            font_size -= 0.5
+
+        if p is not None:
+            p.drawOn(c, left_margin, y_top - p_h)
+
+        c.saveState()
+        c.setStrokeColor(colors.lightgrey)
+        c.setLineWidth(0.4)
+        c.line(left_margin, separator_y, A4[0] - right_margin, separator_y)
+        c.restoreState()
+
+        slot_index += 1
+
+    # 마지막 페이지 저장. 추가 인쇄의 첫 페이지에는 기존 footer를 덧찍지 않습니다.
+    _draw_footer(draw_on_first_extra_page=False)
+    c.save()
     return buf.getvalue()
 
 
@@ -2999,10 +3145,15 @@ def render_reship_page():
 
     def _clear_reship_generated() -> None:
         st.session_state.pop("reship_generated_excel", None)
+        st.session_state.pop("reship_generated_pdf", None)
+        # 이전 버전에서 남아 있을 수 있는 Word 생성값도 정리합니다.
         st.session_state.pop("reship_generated_word", None)
 
+    def _clear_reship_pdf_only() -> None:
+        st.session_state.pop("reship_generated_pdf", None)
+
     def _expand_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-        """송장수량만큼 엑셀용 행을 반복합니다. Word용 데이터는 반복하지 않습니다."""
+        """송장수량만큼 엑셀용 행을 반복합니다. PDF용 수취인 표시는 한 번만 유지합니다."""
         rows = []
         for _, r in _normalize_reship_df(df).iterrows():
             qty = _normalize_count(r.get("송장수량", 1))
@@ -3103,7 +3254,7 @@ def render_reship_page():
         if committed_df.empty:
             st.caption("왼쪽에 재배송 정보를 붙여넣고 '반영'을 누르면 이곳에 표시됩니다.")
         else:
-            st.caption("표 안의 값을 클릭해 바로 수정할 수 있습니다. 고친 뒤 아래 '수정' 버튼을 눌러야 엑셀·Word에 반영됩니다.")
+            st.caption("표 안의 값을 클릭해 바로 수정할 수 있습니다. 고친 뒤 아래 '수정' 버튼을 눌러야 엑셀·PDF에 반영됩니다.")
             editor_ver = int(st.session_state.get("reship_editor_version", 0))
 
             # 앞전의 분석 결과 표 형태를 그대로 유지하되, 셀만 직접 수정할 수 있게 합니다.
@@ -3153,7 +3304,7 @@ def render_reship_page():
                 st.session_state["reship_rows"] = updated_df.to_dict("records")
                 st.session_state["reship_editor_version"] = editor_ver + 1
                 _clear_reship_generated()
-                st.session_state["reship_flash_message"] = "수정한 내용이 엑셀·Word 생성 데이터에 반영되었습니다."
+                st.session_state["reship_flash_message"] = "수정한 내용이 엑셀·PDF 생성 데이터에 반영되었습니다."
                 st.rerun()
 
     # 미리보기와 파일 생성은 '반영' 또는 '수정'으로 확정된 값만 사용합니다.
@@ -3179,17 +3330,38 @@ def render_reship_page():
             st.caption("송장수량만큼 같은 정보가 실제 엑셀 행으로 추가됩니다. 화면에서는 '배송메모'로 표시하고, 실제 엑셀에서는 '출입방법 상세설명' 열에 입력됩니다.")
 
         with p2:
-            st.subheader("Word 미리보기")
-            word_preview_lines = []
+            st.subheader("PDF 미리보기")
+            st.caption("기존 새벽/익일 수취인별 PDF와 같은 형태 · 한 페이지 12칸 고정 · 송장수량 2 이상은 이름 왼쪽에 연한 빨강 (2), (3) 표시")
+
+            if "reship_pdf_start_position" not in st.session_state:
+                st.session_state["reship_pdf_start_position"] = 1
+            pdf_start_position = st.number_input(
+                "추가 인쇄 시작 위치",
+                min_value=1,
+                max_value=RESHIP_RECIPIENT_SLOTS_PER_PAGE,
+                step=1,
+                key="reship_pdf_start_position",
+                help="1 = 새 종이 첫 칸부터. 예: 오전에 1~4칸까지 출력한 종이에 이어 찍으려면 5를 선택합니다.",
+                on_change=_clear_reship_pdf_only,
+            )
+            if int(pdf_start_position) > 1:
+                st.caption(f"1~{int(pdf_start_position)-1}번 칸은 완전히 비우고 {int(pdf_start_position)}번 칸부터 새 재배송건을 출력합니다.")
+            else:
+                st.caption("새 종이에 출력할 때는 시작 위치 1을 사용합니다.")
+
+            pdf_preview_lines = []
             for _, r in applied_df.iterrows():
                 name = html.escape(str(r.get("수취인", "") or ""))
                 products = html.escape(str(r.get("상품목록", "") or ""))
                 qty = _normalize_count(r.get("송장수량", 1))
                 qty_prefix = f'<span style="color:#D99A9A;">({qty})</span> ' if qty > 1 else ""
-                content = f"{qty_prefix}{name} - {products}" if name else f"{qty_prefix}{products}"
-                word_preview_lines.append(f'<div style="margin-bottom:0.9rem;">{content}</div>')
+                content = f"{qty_prefix}<b>{name}</b> - {products}" if name else f"{qty_prefix}{products}"
+                pdf_preview_lines.append(
+                    '<div style="padding:0.35rem 0 0.55rem 0; border-bottom:1px solid #e5e5e5;">'
+                    + content + '</div>'
+                )
             st.markdown(
-                '<div style="font-size:14pt; line-height:1.35;">' + "".join(word_preview_lines) + "</div>",
+                '<div style="font-size:12pt; line-height:1.3;">' + "".join(pdf_preview_lines) + "</div>",
                 unsafe_allow_html=True,
             )
 
@@ -3206,7 +3378,7 @@ def render_reship_page():
 
     generate_disabled = (len(applied_df) == 0) or bool(required_missing)
     if st.button(
-        "📄 재배송 파일 생성하기 (엑셀 + Word)",
+        "📄 재배송 파일 생성하기 (엑셀 + PDF)",
         use_container_width=True,
         disabled=generate_disabled,
         key="reship_generate_btn",
@@ -3248,16 +3420,20 @@ def render_reship_page():
             try:
                 template_bytes = TC_TEMPLATE_DEFAULT_PATH.read_bytes()
                 st.session_state["reship_generated_excel"] = build_tc_excel_bytes(template_bytes, tc_rows)
-                # Word에는 각 재배송 건을 한 번만 적고, 송장수량은 이름 왼쪽에 (2), (3) 형태로 표시합니다.
-                st.session_state["reship_generated_word"] = build_reship_docx(final_entries)
-                _transient_success("재배송송장.xlsx와 재배송건.docx를 생성했습니다.", 3.0)
+                start_position = int(st.session_state.get("reship_pdf_start_position", 1) or 1)
+                st.session_state["reship_generated_pdf"] = build_reship_recipient_pdf(
+                    final_entries,
+                    start_position=start_position,
+                    footer_prefix="재배송",
+                )
+                _transient_success("재배송송장.xlsx와 재배송건.pdf를 생성했습니다.", 3.0)
             except Exception as e:
                 st.error(f"재배송 파일 생성 실패: {e}")
                 st.exception(e)
 
     excel_bytes = st.session_state.get("reship_generated_excel")
-    word_bytes = st.session_state.get("reship_generated_word")
-    if excel_bytes or word_bytes:
+    pdf_bytes = st.session_state.get("reship_generated_pdf")
+    if excel_bytes or pdf_bytes:
         d1, d2 = st.columns(2)
         with d1:
             if excel_bytes:
@@ -3270,14 +3446,14 @@ def render_reship_page():
                     key="reship_excel_download",
                 )
         with d2:
-            if word_bytes:
+            if pdf_bytes:
                 st.download_button(
-                    "⬇️ 재배송건.docx 다운로드",
-                    data=word_bytes,
-                    file_name="재배송건.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "⬇️ 재배송건.pdf 다운로드",
+                    data=pdf_bytes,
+                    file_name="재배송건.pdf",
+                    mime="application/pdf",
                     use_container_width=True,
-                    key="reship_word_download",
+                    key="reship_pdf_download",
                 )
 
 def render_product_totals_page():
