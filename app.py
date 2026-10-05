@@ -2802,8 +2802,22 @@ def render_excel_results_page():
 
     base = work[(work["수량"].notna()) & (work["제품명"] != "")].copy()
 
+    # 같은 수취인이 동일 상품을 새벽/익일로 나눠 주문한 경우에도
+    # 합산규칙을 적용하기 전에 수량을 먼저 합칩니다.
+    # (수취인별 출력과 동일한 그룹 기준을 사용)
+    summary_recipient_keys = ["구매자명", "수취인명", "통합배송지"]
+    summary_source = (
+        base.groupby(
+            summary_recipient_keys + ["제품명", "구분", "합산규칙"],
+            as_index=False,
+            sort=False,
+            dropna=False,
+        )["수량"]
+        .sum()
+    )
+
     exploded = explode_sum_rule_rows(
-        base[["제품명", "구분", "수량", "합산규칙"]],
+        summary_source[["제품명", "구분", "수량", "합산규칙"]],
         bundle_units=bundle_units,
         default_unit=default_unit,
     )
@@ -2944,7 +2958,7 @@ def render_excel_results_page():
 
     base2 = base.copy()
     base2["배송구분"] = base2["옵션정보"].apply(classify_delivery)
-    key_cols = ["구매자명", "수취인명", "통합배송지"]
+    key_cols = summary_recipient_keys
 
     grp_deliv = (
         base2.groupby(key_cols)["배송구분"]
