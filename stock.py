@@ -1708,7 +1708,6 @@ def render_bulk_stock_page():
                     telegram_send_message(auto_state["summary_text"])
                 except Exception:
                     pass
-                st.info("자동 실행을 중지했습니다.")
 
             if start_auto:
                 missing_env = _get_required_auto_env_missing()
@@ -1890,31 +1889,6 @@ def render_bulk_stock_page():
             auto_state = st.session_state.get("bulk_auto_state") or {}
             status = auto_state.get("status", "idle")
             poll_active = bool(auto_state.get("polling"))
-
-            if status == "error" and auto_state.get("error"):
-                st.error(auto_state.get("error"))
-            elif status == "done":
-                st.success("자동 반영이 완료되었습니다.")
-            elif status == "stopped":
-                st.info("자동 실행이 중지되었습니다.")
-            elif poll_active:
-                st.info("텔레그램 첫 답장 1개를 기다리는 중입니다.")
-            else:
-                st.caption("자동 실행 시작을 누르면 텔레그램 답장을 자동 확인합니다.")
-
-            if auto_state.get("message_text"):
-                st.text(auto_state.get("message_text"))
-            if auto_state.get("reply_text"):
-                st.caption("처리된 답장")
-                st.text(auto_state.get("reply_text"))
-            if auto_state.get("memo_text"):
-                st.caption("전송된 메모")
-                st.text(auto_state.get("memo_text"))
-            if auto_state.get("summary_text"):
-                st.caption("최종 결과")
-                st.text(auto_state.get("summary_text"))
-            if auto_state.get("last_check_at"):
-                st.caption(f"마지막 확인: {auto_state.get('last_check_at')}")
 
             if poll_active and status == "waiting_reply":
                 try:
